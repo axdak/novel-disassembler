@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+"""章节序号、章节时间和事件分组的统一规则。"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from datetime import datetime, timedelta
+import re
+from typing import Any
+
+
+BASE_TIME = "0001-01-01T00:00:00"
+_BASE_DATETIME = datetime(1, 1, 1)
+_CHAPTER_NUMBER_RE = re.compile(r"(?<!\d)(\d+)(?!\d)")
+_GROUP_ORDER_RE = re.compile(r"^(\d{4,})-(.+)$")
+_NUMERIC_GROUP_NAME_RE = re.compile(r"^\d+(?:[-_./ ]\d+)*$")
+
+
+def parse_chapter_numbers(value: Any) -> list[int]:
+    """Extract positive chapter sequence numbers from compact or legacy text."""
+    if value is None:
+        return []
+    if isinstance(value, int):
+        return [value] if value > 0 else []
+    if isinstance(value, (list, tuple, set)):
+        numbers: list[int] = []
+        for item in value:
+            numbers.extend(parse_chapter_numbers(item))
+        return numbers
+    return [int(match) for match in _CHAPTER_NUMBER_RE.findall(str(value)) if int(match) > 0]
+
+
+def chapter_width(numbers: list[int] | None = None) -> int:
+    maximum = max(numbers or [0])
+    return max(4, len(str(maximum)))
+
+
+def format_chapter(sequence: int, width: int = 4) -> str:
+    if sequence < 1:
+        raise ValueError("章节序号必须为正整数")
+    return str(sequence).zfill(max(width, len(str(sequence))))
+
+
+def normalize_chapter_value(value: Any, width: int = 4) -> str:
+    numbers = parse_chapter_numbers(value)
+    return format_chapter(numbers[0], width) if numbers else ""
+
+
+def normalize_involved_chapters(value: Any, width: int | None = None) -> str:
+    """Return the canonical Chinese-comma, ascending, deduplicated chapter string."""
+    numbers = sorted(set(parse_chapter_numbers(value)))
+    if not numbers:
+        return ""
+    actual_width = max(width or 4, chapter_width(numbers))
+    return "，".join(format_chapter(number, actual_width) for number in numbers)
+
+
+def parse_involved_chapters(value: Any) -> list[int]:
+    """Parse the canonical field as a sorted unique sequence list."""
+    return sorted(set(parse_chapter_numbers(value)))
+
+
+def chapter_time(sequence: int) -> str:
+    if sequence < 1:
+        raise ValueError("章节序号必须为正整数")
+    dt = _BASE_DATETIME + timedelta(days=sequence - 1)
+    # ``strftime('%Y')`` does not zero-pad years below 1000 consistently across
+    # C runtimes.  Chapter time is a serialized contract, so format each field
+    # explicitly instead of inheriting platform-specific behavior.
+    return (
+        f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}"
+        f"T{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}"
+    )
+
+
+def is_iso_time(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return False
+    return value == (
+        f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}"
+        f"T{dt.hour:02d}:{dt.minute:02d}:{dt.second:02d}"
+    )
+
+
+def first_involved_chapter(event: dict[str, Any]) -> int | None:
+    detail = event.get("详情", {})
+    involved = detail.get("涉及章节") if isinstance(detail, dict) else None
+    chapters = parse_involved_chapters(involved)
+    return chapters[0] if chapters else None
+
+
+def last_involved_chapter(event: dict[str, Any]) -> int | None:
+    detail = event.get("详情", {})
+    involved = detail.get("涉及章节") if isinstance(detail, dict) else None
+    chapters = parse_involved_chapters(involved)
+    return chapters[-1] if chapters else None
+
+
+def normalize_event_temporal_fields(event: dict[str, Any], fallback_chapter: Any = None) -> dict[str, Any]:
+    """Normalize an event in-place and derive chapter time from its first chapter."""
+    detail = event.setdefault("详情", {})
+    if not isinstance(detail, dict):
+        detail = {}
+        event["详情"] = detail
+
+    chapters = normalize_involved_chapters(detail.get("涉及章节"))
+    if not chapters:
+        chapters = normalize_involved_chapters(
+            detail.get("来源章节")
+            or detail.get("首次出现章节")
+            or detail.get("首次章节")
+            or event.get("首次章节")
+            or event.get("涉及章节")
+            or fallback_chapter
+        )
+    detail["涉及章节"] = chapters
+    parsed = parse_involved_chapters(chapters)
+    if parsed:
+        event["时间"] = chapter_time(parsed[0])
+    elif not is_iso_time(event.get("时间")):
+        event["时间"] = BASE_TIME
+    return event
+
+
+def strip_group_order(group: Any) -> str:
+    text = str(group or "").strip()
+    matched = _GROUP_ORDER_RE.match(text)
+    return matched.group(2).strip() if matched else text
+
+
+def split_event_group(group: Any) -> tuple[int | None, str]:
+    """Return the optional visible segment rank and its human-readable name."""
+    text = str(group or "").strip()
+    matched = _GROUP_ORDER_RE.match(text)
+    if matched:
+        return int(matched.group(1)), matched.group(2).strip()
+    return None, text
+
+
+def is_semantic_event_group_name(name: Any) -> bool:
+    """Whether a plot-segment name contains narrative information.
+
+    The visible number before the dash is only a stable sort key.  A value such
+    as ``0010-0001`` therefore contains no usable grouping information and
+    must never survive a governance pass as a valid plot segment.
+    """
+    text = str(name or "").strip()
+    return bool(text) and not _NUMERIC_GROUP_NAME_RE.fullmatch(text)
+
+
+def event_group_name(event: dict[str, Any]) -> str:
+    """Choose the semantic plot-segment name for an event.
+
+    Existing semantic ``分组`` values stay authoritative.  Legacy numeric-only
+    values are replaced by ``详情.剧情段`` when available, rather than being
+    re-emitted as the misleading ``段号-章节号`` form.
+    """
+    _, name = split_event_group(event.get("分组"))
+    if is_semantic_event_group_name(name):
+        return name
+    detail = event.get("详情")
+    plot_segment = detail.get("剧情段") if isinstance(detail, dict) else None
+    if is_semantic_event_group_name(plot_segment):
+        return str(plot_segment).strip()
+    return name
+
+
+def assign_event_group_orders(events: list[dict[str, Any]], *, split_repeated: bool = False) -> None:
+    """Assign visible ranks to contiguous plot-segment runs without moving events.
+
+    A group is a page-level plot segment, not a reusable topic label. Migration
+    can split legacy repeated names into ``名称续2``; normal processing leaves
+    such reuse visible for the structure validator to reject.
+    """
+    runs: list[tuple[str, list[dict[str, Any]]]] = []
+    for event in events:
+        base_name = event_group_name(event)
+        # Do not turn a missing/number-only name into ``0010-0001``.  Keeping
+        # the invalid source value lets validation report the data problem
+        # clearly instead of laundering it into a plausible-looking group.
+        if not is_semantic_event_group_name(base_name):
+            continue
+        if runs and runs[-1][0] == base_name:
+            runs[-1][1].append(event)
+        else:
+            runs.append((base_name, [event]))
+
+    occurrences: dict[str, int] = {}
+    for run_index, (base_name, members) in enumerate(runs, start=1):
+        occurrences[base_name] = occurrences.get(base_name, 0) + 1
+        display_name = base_name
+        if split_repeated and occurrences[base_name] > 1:
+            display_name = f"{base_name}续{occurrences[base_name]}"
+        rank = run_index * 10
+        rank_text = str(rank).zfill(max(4, len(str(rank))))
+        for member in members:
+            member["分组"] = f"{rank_text}-{display_name}"
+
+
+def event_group_order_errors(events: list[dict[str, Any]]) -> list[str]:
+    """Validate sorted, contiguous page groups while preserving event-array order."""
+    errors: list[str] = []
+    active_name = ""
+    closed_names: set[str] = set()
+    expected_rank = 10
+
+    for index, event in enumerate(events):
+        rank, name = split_event_group(event.get("分组"))
+        if not name:
+            continue
+        if rank is None:
+            errors.append(f"事件[{index}].分组 必须为段号-剧情段名+剧情线主题+叙事功能+爽点情绪点+冲突悬念类型，例如0010-退婚事件+情感尊严线+冲突爆发+羞辱反击+身份与尊严")
+            continue
+        if not is_semantic_event_group_name(name):
+            errors.append(f"事件[{index}].分组 段号后必须是有语义的剧情段名，不能是纯编号[{name}]")
+            continue
+        if name != active_name:
+            if active_name:
+                closed_names.add(active_name)
+            if name in closed_names:
+                errors.append(f"事件[{index}].分组 非连续复用剧情段名称[{name}]；请拆分为新的剧情段")
+            if rank != expected_rank:
+                errors.append(f"事件[{index}].分组 段号应为{str(expected_rank).zfill(4)}，实际为{str(rank).zfill(4)}")
+            active_name = name
+            expected_rank += 10
+        elif rank != expected_rank - 10:
+            errors.append(f"事件[{index}].分组 与当前连续剧情段的段号不一致")
+    return errors
+
+
+def recompute_event_group_prefixes(events: list[dict[str, Any]]) -> None:
+    """Compatibility alias for callers still using the old function name."""
+    assign_event_group_orders(events)
+
+
+def insert_event_in_chapter_order(events: list[dict[str, Any]], event: dict[str, Any]) -> int:
+    """Insert a newly created historical event while preserving equal-sequence order."""
+    target = first_involved_chapter(event)
+    if target is None:
+        events.append(event)
+        return len(events) - 1
+    insert_at = len(events)
+    for index, existing in enumerate(events):
+        existing_first = first_involved_chapter(existing)
+        if existing_first is not None and existing_first > target:
+            insert_at = index
+            break
+    events.insert(insert_at, event)
+    return insert_at
+
+
+def chronological_event_order_errors(events: list[dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    previous: int | None = None
+    for index, event in enumerate(events):
+        current = first_involved_chapter(event)
+        if current is None:
+            errors.append(f"事件[{index}]缺少有效涉及章节")
+            continue
+        if previous is not None and current < previous:
+            errors.append(f"事件[{index}]最小涉及章节{format_chapter(current)}早于前一事件")
+        previous = current
+    return errors
+
+
+def clone_with_normalized_event_temporal_fields(event: dict[str, Any], fallback_chapter: Any = None) -> dict[str, Any]:
+    result = deepcopy(event)
+    return normalize_event_temporal_fields(result, fallback_chapter)

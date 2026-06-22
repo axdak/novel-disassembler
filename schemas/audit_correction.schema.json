@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "章节范围": { "type": "string" },
+    "合并重复元素": { "type": "array" },
+    "降级元素": { "type": "array" },
+    "补充关系": { "type": "array" },
+    "修正伏笔": { "type": "array" },
+    "修正事件粒度": { "type": "array" },
+    "补充缺失元素": { "type": "array" },
+    "待人工确认": { "type": "array" },
+    "新增元素": { "type": "object" },
+    "修改元素": { "type": "object" }
+  },
+  "required": ["章节范围", "新增元素", "修改元素"]
+}
