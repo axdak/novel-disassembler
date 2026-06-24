@@ -373,7 +373,7 @@ def build_chapter_block(project_dir: Path, ch: Dict[str, Any], task: str, includ
         lines.append("```")
         lines.append("")
 
-    if task in {"characters", "plot", "report", "custom", "worldview", "settings", "plotlines", "outline", "detailed_outline", "visual_assets"}:
+    if task in {"characters", "plot", "report", "custom", "worldview", "settings", "plotlines", "outline", "detailed_outline", "visual_assets", "chapter_structure", "narrative_structure"}:
         delta = load_json(delta_path)
         lines.append("#### 本章Delta")
         lines.append("```json")
@@ -795,8 +795,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--max-original-chars", type=int, default=6000, help="每章原文最多放入字符数；sample模式会抽样")
     parser.add_argument("--max-analysis-chars", type=int, default=12000, help="每章分析MD最多放入字符数")
     parser.add_argument("--out-dir", default="", help="输出目录；默认 全书分析/_任务包/<timestamp>_<task>")
-    parser.add_argument("--per-chapter", action="store_true", help="（仅 visual_assets）每个章节生成一份独立任务包，产物写入 全书分析/视觉资产/分章/chNNN/")
-    parser.add_argument("--aggregate", action="store_true", help="（仅 visual_assets）只生成顶层 aggregate 任务包，把 分章/chNNN/ 合并为顶层五件套")
+    parser.add_argument("--per-chapter", action="store_true", help="每个章节生成一份独立任务包（visual_assets / chapter_structure）")
+    parser.add_argument("--aggregate", action="store_true", help="把分章产物合并为顶层五件套（仅 visual_assets）")
     args = parser.parse_args(argv)
 
     project_dir = Path(args.project_dir)
@@ -812,6 +812,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     if args.per_chapter and args.aggregate:
         print("错误: --per-chapter 和 --aggregate 不能同时使用")
+        return 1
+    if args.task == "chapter_structure" and not args.per_chapter:
+        print("错误: --task chapter_structure 必须配合 --per-chapter 使用(每章独立产物)")
         return 1
 
     index = load_index(project_dir)

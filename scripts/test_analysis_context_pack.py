@@ -187,3 +187,55 @@ def test_reduce_contract_chapter_structure_mentions_target_file():
     assert "禁止跨章" in text
     # 强制五小节齐全的硬规则
     assert "本章无推进" in text or "本章无对应内容" in text
+
+
+from pathlib import Path
+from analysis_context_pack import main as cli_main
+
+
+def test_chapter_structure_per_chapter_dispatch_creates_manifest(tmp_path, capsys):
+    project = tmp_path / "novel"
+    (project / "原文拆解").mkdir(parents=True)
+    (project / "章节处理").mkdir(parents=True)
+    (project / "原文拆解" / "_索引.json").write_text(
+        '{"chapters":[{"seq":1,"filename":"第001章_序章.md","title":"序章"}]}',
+        encoding="utf-8",
+    )
+    (project / "原文拆解" / "第001章_序章.md").write_text(
+        "# 第001章 序章\n\n原文内容", encoding="utf-8"
+    )
+    (project / "章节处理" / "第001章_序章.md").write_text(
+        "# 第001章 序章\n\n## 1. 剧情梗概\n本章序章。", encoding="utf-8"
+    )
+
+    rc = cli_main([str(project), "--task", "chapter_structure", "--per-chapter", "--chapters", "1"])
+    assert rc == 0
+
+    pack_root = project / "全书分析" / "_任务包"
+    runs = list(pack_root.glob("*_chapter_structure_per_chapter"))
+    assert len(runs) == 1, runs
+
+    manifest = json.loads((runs[0] / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["task"] == "chapter_structure"
+    assert manifest["mode"] == "per_chapter"
+    assert len(manifest["packs"]) == 1
+    assert manifest["packs"][0]["seq"] == 1
+    assert "全书分析/故事结构/分章/ch001/章节结构.md" in manifest["packs"][0]["outputs"]
+
+
+def test_chapter_structure_without_per_chapter_is_rejected(tmp_path, capsys):
+    """I1 fix: chapter_structure must require --per-chapter."""
+    project = tmp_path / "novel"
+    (project / "原文拆解").mkdir(parents=True)
+    (project / "章节处理").mkdir(parents=True)
+    (project / "原文拆解" / "_索引.json").write_text(
+        '{"chapters":[{"seq":1,"filename":"第001章.md","title":"序"}]}',
+        encoding="utf-8",
+    )
+    (project / "原文拆解" / "第001章.md").write_text("# 第001章\n", encoding="utf-8")
+    (project / "章节处理" / "第001章.md").write_text("# 第001章\n", encoding="utf-8")
+
+    rc = cli_main([str(project), "--task", "chapter_structure", "--chapters", "1"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "--per-chapter" in captured.out
