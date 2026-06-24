@@ -46,6 +46,8 @@ Reduce 汇总
 | plotlines | 剧情线梳理 | 剧情线总表.md、剧情线交汇矩阵.md |
 | outline | 大纲反推 | 全书分析/剧情结构/全书大纲.md |
 | detailed_outline | 细纲反推 | 全书分析/剧情结构/章节细纲.md |
+| chapter_structure | 章节结构定位(分章) | 全书分析/故事结构/分章/chNNN/章节结构.md |
+| narrative_structure | 故事结构全书分析 | 全书分析/故事结构/三幕式结构图.md 等 7 份产物 |
 
 四维度与基础维度的层次区别：
 
@@ -165,6 +167,24 @@ detailed_outline → 章/场景级微观结构反推
 ```text
 章节分析MD（10维度）> 章节梗概汇总 > 事件集 + 线索集 > 原文抽样 > 本章Delta
 ```
+
+### chapter_structure
+
+优先级:
+
+```text
+本章原文 + 本章章节分析MD > 本章 Delta
+```
+
+### narrative_structure
+
+优先级:
+
+```text
+分章 章节结构.md > 章节梗概汇总 > 全书大纲 > 剧情线总表 > 章节分析MD抽样 > 原文抽样
+```
+
+三种节拍图(三幕式/Brooks四部分/Freytag五段)必须互相对齐;冲突处标"待确认",不强行折中。
 
 ## 分包策略
 

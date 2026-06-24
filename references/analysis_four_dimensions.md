@@ -339,3 +339,7 @@ summary → characters → plot → worldview → settings → plotlines → out
 4. 长篇必须先分包再汇总，不允许一次性让模型读全书。
 5. 当故事结构JSON被治理修正后，相关分析报告应可局部刷新。
 ```
+
+## 扩展:故事结构维度
+
+四维度之外,另有 **故事结构维度** 覆盖叙事节拍 / 七要素 / 故事力学 / 故事工程学 / 小说骨架,详见 [`analysis_narrative_structure.md`](analysis_narrative_structure.md)。
