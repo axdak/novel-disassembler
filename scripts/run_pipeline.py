@@ -4,7 +4,7 @@
 
 它负责：
 - 初始化/拆章/目录/进度；
-- 生成单章任务包，让模型填写章节分析MD和Delta JSON；
+- 分别生成章节分析任务与Delta提取任务，让模型先写MD、再写JSON；
 - 对已经填写好的章节产物自动校验、合并、规范化、快照、diff、更新进度；
 - 失败时回滚并生成 repair_prompt；
 - 全书/局部分析任务包生成。
@@ -21,7 +21,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,6 +28,42 @@ from typing import Any, Dict, List, Optional, Tuple
 from chronology import chapter_time
 from story_schema_rules import COLLECTION_KEYS
 from validate_structure import validate_structure_file
+
+from jinja2 import Environment, FileSystemLoader, StrictUndefined
+
+
+def _ensure_utf8_console() -> None:
+    """把 stdout/stderr 切到 UTF-8。
+
+    Windows 控制台默认 GBK，遇到中文/校验报告中的 \\ufffd 替换字符会抛
+    UnicodeEncodeError。reconfigure 是 Python 3.7+ 的标准做法；在 Linux/macOS
+    上等价于 no-op（本来就是 UTF-8）。模块导入时立即生效，确保 main() 入口、
+    被测试直接调用的 cmd_* 函数、以及任何 print 调用都受保护。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
+
+
+_ensure_utf8_console()
+
+PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+_JINJA_ENV = Environment(
+    loader=FileSystemLoader(str(PROMPTS_DIR)),
+    undefined=StrictUndefined,
+    keep_trailing_newline=True,
+)
+
+
+def render_prompt(name: str, **context: Any) -> str:
+    """渲染 prompts/<name>.j2 任务包模板。
+
+    所有任务包都从 prompts/ 单一来源生成，避免脚本和模板漂移。
+    缺变量时 StrictUndefined 立刻报错，不静默渲染成空。
+    """
+    return _JINJA_ENV.get_template(name).render(**context)
 
 REQUIRED_DIRS = [
     "原文", "原文拆解", "章节处理", "章节处理/_任务包", "章节处理/_修复任务",
@@ -50,21 +85,15 @@ ANALYSIS_OUTPUTS = {
     "visual_assets": ["全书分析/视觉资产/视觉资产清单.md", "全书分析/视觉资产/关键场景分镜表.md", "全书分析/视觉资产/AI绘图提示词素材.md", "全书分析/视觉资产/角色外观一致性表.md", "全书分析/视觉资产/场景氛围表.md"],
 }
 MULTI_UNIT_ARTIFACT_RE = re.compile(r"^第\d+\s*(?:-|—|–|~|～|至|到)\s*\d+章_.*\.(?:md|json)$")
-INTERNAL_COMMAND_TIMEOUT_SECONDS = 600
-DEFAULT_AUDIT_TIMEOUT_SECONDS = 900
+# 单次子进程调用超时（秒）。生产场景默认 600；测试可用 ND_COMMAND_TIMEOUT=10
+# 之类的更短值，让卡死的子进程更快暴露而不是等满 10 分钟。
+INTERNAL_COMMAND_TIMEOUT_SECONDS = int(os.getenv("ND_COMMAND_TIMEOUT", "600"))
 
 
 def non_negative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("必须为非负整数")
-    return parsed
-
-
-def audit_timeout_seconds_arg(value: str) -> int:
-    parsed = int(value)
-    if not 600 <= parsed <= 1800:
-        raise argparse.ArgumentTypeError("必须在 600 到 1800 秒之间")
     return parsed
 
 
@@ -148,13 +177,36 @@ def save_json(path: Path, data: Any) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
+# 进程内 normalize 去抖缓存：project_dir → (mtime_ns, size) of story after last normalize。
+# 同一进程里 ensure_story 会被反复调用（测试、GUI、连续提交），每次都拉起
+# normalize_story_schema 子进程在 Windows 上要 ~2 秒冷启动。只要 story 自上次
+# normalize 后没有被任何 in-place 子进程改动（merge_delta、apply_governance 等
+# 改完后 mtime 变化会自动让缓存失效），就跳过这次 subprocess。
+_ENSURE_STORY_NORMALIZE_CACHE: Dict[str, Tuple[int, int]] = {}
+
+
+def _story_signature(story: Path) -> Optional[Tuple[int, int]]:
+    try:
+        stat = story.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
 def ensure_story(project_dir: Path) -> Path:
     init_dirs(project_dir)
     story = project_dir / "故事结构_增量.json"
     if not story.is_file():
         run_cmd([sys.executable, str(script_path("progress_manager.py")), "init-incremental", str(project_dir)])
+    cache_key = str(project_dir.resolve())
+    current_sig = _story_signature(story)
+    if current_sig is not None and _ENSURE_STORY_NORMALIZE_CACHE.get(cache_key) == current_sig:
+        return story
     # 保全式规范化，避免历史字段被强 schema 卡死。
     run_cmd([sys.executable, str(script_path("normalize_story_schema.py")), str(story), "--in-place"], project_dir / "质量治理" / "规范化" / "normalize_latest.txt")
+    post_sig = _story_signature(story)
+    if post_sig is not None:
+        _ENSURE_STORY_NORMALIZE_CACHE[cache_key] = post_sig
     return story
 
 
@@ -217,6 +269,7 @@ def chapter_by_seq(project_dir: Path, seq: int) -> Optional[Path]:
 def artifact_paths(project_dir: Path, chapter: Path) -> Dict[str, Path]:
     seq = seq_from_file(chapter)
     base = chapter.stem
+    task_dir = project_dir / "章节处理" / "_任务包"
     return {
         "chapter": chapter,
         "analysis": project_dir / "章节处理" / chapter.name,
@@ -226,7 +279,8 @@ def artifact_paths(project_dir: Path, chapter: Path) -> Dict[str, Path]:
         "before": project_dir / "故事结构版本" / f"story_before_ch{seq:03d}.json",
         "after": project_dir / "故事结构版本" / f"story_after_ch{seq:03d}.json",
         "diff": project_dir / "结构变更日志" / f"diff_ch{seq:03d}.json",
-        "task": project_dir / "章节处理" / "_任务包" / f"task_ch{seq:03d}.md",
+        "analysis_task": task_dir / f"task_ch{seq:03d}_analysis.md",
+        "delta_task": task_dir / f"task_ch{seq:03d}_delta.md",
         "repair": project_dir / "章节处理" / "_修复任务" / f"repair_ch{seq:03d}.md",
     }
 
@@ -292,6 +346,12 @@ def replay_one_delta(project_dir: Path, seq: int) -> int:
         print(f"重放失败: 缺少第{seq:03d}章Delta: {p['delta']}")
         return 1
 
+    compress_delta_report = project_dir / "质量治理" / "delta校验" / f"compress_ch{seq:03d}.json"
+    rc = run_cmd([sys.executable, str(script_path("compress_tags.py")), "--delta", str(p["delta"]), "--report", str(compress_delta_report)])
+    if rc != 0:
+        print(f"重放失败: 第{seq:03d}章 Delta 标签压缩失败，见: {compress_delta_report}")
+        return 1
+
     rc = run_cmd([sys.executable, str(script_path("validate_delta.py")), "--mode", "process", "--report-json", str(p["delta_report"]), str(story), str(p["delta"])])
     if rc != 0:
         print(f"重放失败: 第{seq:03d}章Delta校验失败，见: {p['delta_report']}")
@@ -308,6 +368,12 @@ def replay_one_delta(project_dir: Path, seq: int) -> int:
         return 1
 
     run_cmd([sys.executable, str(script_path("normalize_story_schema.py")), str(story), "--in-place", "--report", str(project_dir / "质量治理" / "规范化" / f"normalize_ch{seq:03d}.txt")])
+    compress_struct_report = project_dir / "质量治理" / "规范化" / f"compress_after_ch{seq:03d}.json"
+    rc = run_cmd([sys.executable, str(script_path("compress_tags.py")), "--structure", str(story), "--report", str(compress_struct_report)])
+    if rc != 0:
+        shutil.copy2(rollback_tmp, story)
+        print(f"重放失败: 第{seq:03d}章合并后标签压缩失败，已回滚，见: {compress_struct_report}")
+        return 1
     rc = run_cmd([sys.executable, str(script_path("validate_structure.py")), "--chapter-check", "--mode", "process", "--report-json", str(p["chapter_report"]), str(story), str(p["delta"])])
     if rc != 0:
         shutil.copy2(rollback_tmp, story)
@@ -442,17 +508,18 @@ def read_excerpt(path: Path, limit: int = 12000) -> str:
     return text
 
 
-def get_previous_correction(project_dir: Path, current_start: int) -> str:
+def get_previous_correction(project_dir: Path, current_start: int) -> Optional[Dict[str, str]]:
+    """返回上一周期 correction JSON 的 {name, content}，无则 None。"""
     if current_start <= 1:
-        return ""
+        return None
     audit_dir = project_dir / "质量治理" / "周期审计"
     if not audit_dir.is_dir():
-        return ""
+        return None
     for p in sorted(audit_dir.glob("correction_*.json"), reverse=True):
         m = re.match(r"correction_(\d+)-(\d+)\.json", p.name)
         if m and int(m.group(2)) < current_start:
-            return f"\n\n## 上一个审计周期治理结果 ({p.name})\n\n```json\n{read_excerpt(p, 5000)}\n```\n"
-    return ""
+            return {"name": p.name, "content": read_excerpt(p, 5000)}
+    return None
 
 
 def extract_relevant_elements_for_audit(story_data: dict, project_dir: Path, start: int, end: int) -> str:
@@ -513,105 +580,53 @@ def write_audit_pack(project_dir: Path, start: int, end: int, force: bool = Fals
         print(f"周期审计任务包已存在: {paths['pack']}")
         return paths["pack"]
 
-    sections = [
-        f"# 周期结构审计任务包 {start:03d}-{end:03d}",
-        "",
-        "## 产出要求",
-        "",
-        f"请基于本任务包审计第{start:03d}-{end:03d}章的结构累积质量，输出治理补丁：",
-        "",
-        f"- 补丁路径：`{paths['correction']}`",
-        "- 补丁必须使用 Delta 格式，只写 `新增元素`、`修改元素` 和可选 `治理操作`。",
-        "- 不要直接重写完整故事结构 JSON。",
-        "",
-        "自动治理运行时，配置的审计器会读取本任务包并将补丁写入上述路径。",
-        "需要手工覆盖自动补丁时，再运行：",
-        "",
-        "```bash",
-        f"python {script_path('run_pipeline.py')} commit-governance {project_dir} {paths['correction']}",
-        "```",
-        "",
-        "## 审计重点",
-        "",
-        "- 合并跨章节重复角色、地点、线索、阵营、物品。",
-        "- 将路人、临时称谓、误识别对象降级或合并到详情。",
-        "- 整理伏笔、关系和事件引用，避免名称漂移。",
-        "- 标签治理时，仅保留有跨元素检索、筛选、聚合或导航价值的标签；纯描述、一次性情境或与介绍重复的标签可放入 `治理操作.治理标签`。无法明确判断时保留。",
-        "- `治理标签` 每项必须给出 类型、名称、保留标签、降级标签、理由；保留与降级必须完整覆盖该元素当前标签集。降级项会自动写入可逆的 `详情.补充标签`。",
-        "- 事件数组顺序代表章节逻辑顺序：治理新增的历史聚合事件必须按最小涉及章节插入；修改既有事件不得改变其时间、涉及章节或数组位置。",
-        "- 事件分组推荐使用 段号-剧情段名+剧情线主题+叙事功能+爽点情绪点+冲突悬念类型，例如0010-退婚事件+情感尊严线+冲突爆发+羞辱反击+身份与尊严；段号后必须写剧情结构信息，严禁0010-0001这类编号套编号。治理后按事件数组顺序全量重排段号，并拆分非连续重复剧情段。",
-        "- 只修正结构质量问题，不凭空补充原文没有的信息。",
-        "",
-    ]
-    
     story_size = story.stat().st_size if story.is_file() else 0
     story_data = load_json(story, {})
-    
-    if story_size < 100 * 1024:
-        sections.extend([
-            "## 完整故事结构",
-            "",
-            "```json",
-            json.dumps(story_data, ensure_ascii=False, indent=2),
-            "```",
-            "",
-        ])
-    elif story_size <= 200 * 1024:
-        sections.extend([
-            "## 当前故事结构索引",
-            "",
-            "```text",
-            build_lightweight_index(story),
-            "```",
-            get_previous_correction(project_dir, start),
-        ])
-    else:
-        relevant_details = extract_relevant_elements_for_audit(story_data, project_dir, start, end)
-        sections.extend([
-            "## 当前故事结构索引",
-            "",
-            "```text",
-            build_lightweight_index(story),
-            "```",
-            "",
-            "## 本周期相关老元素详情",
-            "",
-            "```json",
-            relevant_details,
-            "```",
-            get_previous_correction(project_dir, start),
-        ])
 
+    full_story_json = ""
+    story_index = ""
+    relevant_details = ""
+    if story_size < 100 * 1024:
+        full_story_json = json.dumps(story_data, ensure_ascii=False, indent=2)
+    elif story_size <= 200 * 1024:
+        story_index = build_lightweight_index(story)
+    else:
+        story_index = build_lightweight_index(story)
+        relevant_details = extract_relevant_elements_for_audit(story_data, project_dir, start, end)
+
+    chapters: List[Dict[str, Any]] = []
     for seq in range(start, end + 1):
         chapter = chapter_by_seq(project_dir, seq)
-        sections.append(f"## 第{seq:03d}章材料")
-        sections.append("")
         if not chapter:
-            sections.append(f"[缺失] 原文拆解文件：第{seq:03d}章")
-            sections.append("")
+            chapters.append({"seq": seq, "missing": True})
             continue
         p = artifact_paths(project_dir, chapter)
-        sections.extend([
-            f"- 原文：`{p['chapter']}`",
-            f"- 章节分析：`{p['analysis']}`",
-            f"- Delta：`{p['delta']}`",
-            "",
-            "### 章节分析",
-            "",
-            "```markdown",
-            read_excerpt(p["analysis"]),
-            "```",
-            "",
-            "### Delta",
-            "",
-            "```json",
-            read_excerpt(p["delta"]),
-            "```",
-            "",
-        ])
+        chapters.append({
+            "seq": seq,
+            "missing": False,
+            "chapter_path": p["chapter"],
+            "analysis_path": p["analysis"],
+            "delta_path": p["delta"],
+            "analysis_excerpt": read_excerpt(p["analysis"]),
+            "delta_excerpt": read_excerpt(p["delta"]),
+        })
+
+    content = render_prompt(
+        "audit.j2",
+        start=start,
+        end=end,
+        correction_path=paths["correction"],
+        run_pipeline_path=script_path("run_pipeline.py"),
+        project_dir=project_dir,
+        full_story_json=full_story_json,
+        story_index=story_index,
+        relevant_details=relevant_details,
+        previous_correction=get_previous_correction(project_dir, start),
+        chapters=chapters,
+    )
 
     paths["pack"].parent.mkdir(parents=True, exist_ok=True)
-    paths["pack"].write_text("\n".join(sections), encoding="utf-8")
+    paths["pack"].write_text(content, encoding="utf-8")
     save_json(paths["status"], {
         "status": "queued",
         "range": f"{start:03d}-{end:03d}",
@@ -650,123 +665,35 @@ def update_audit_status(paths: Dict[str, Path], **updates: Any) -> None:
     save_json(paths["status"], data)
 
 
-def write_audit_feedback(paths: Dict[str, Path], attempt: int, reason: str, worker_report: Path) -> None:
-    parts = [
-        f"# 周期审计自动修复反馈（第 {attempt} 次）",
-        "",
-        "## 本轮失败原因",
-        "",
-        reason,
-        "",
-        "## 审计器输出",
-        "",
-        "```text",
-        read_excerpt(worker_report, 30000),
-        "```",
-        "",
-        "请基于上述失败信息重写 correction Delta；不得重写完整故事结构 JSON。",
-    ]
-    paths["feedback"].write_text("\n".join(parts), encoding="utf-8")
-
-
-def run_audit_worker(
-    command_template: str,
-    project_dir: Path,
-    paths: Dict[str, Path],
-    start: int,
-    end: int,
-    attempt: int,
-    timeout_seconds: float,
-) -> Tuple[int, Path]:
-    report = paths["dir"] / f"audit_{start:03d}-{end:03d}.worker_{attempt:02d}.txt"
-    try:
-        command = command_template.format(
-            project_dir=str(project_dir),
-            audit_pack=str(paths["pack"]),
-            correction_path=str(paths["correction"]),
-            feedback_path=str(paths["feedback"]),
-            chapter_start=start,
-            chapter_end=end,
-            attempt=attempt,
-        )
-    except KeyError as exc:
-        report.write_text(f"审计器命令模板字段无效: {exc}\n", encoding="utf-8")
-        return 1, report
-    try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        report.write_text(timeout_output(exc, timeout_seconds), encoding="utf-8")
-        return 124, report
-    report.write_text(proc.stdout, encoding="utf-8")
-    if proc.returncode != 0:
-        return proc.returncode, report
-    if not paths["correction"].is_file() or paths["correction"].stat().st_size == 0:
-        report.write_text(proc.stdout + "\n审计器未生成 correction Delta。\n", encoding="utf-8")
-        return 1, report
-    return 0, report
-
-
 def run_periodic_governance(
     project_dir: Path,
     start: int,
     end: int,
-    audit_command: str,
-    governance_retries: int,
-    retry_delay: float,
-    audit_timeout_seconds: float,
 ) -> int:
     paths = audit_paths(project_dir, start, end)
     write_audit_pack(project_dir, start, end)
-    if not audit_command:
-        reason = "未配置自动审计器。请通过 --audit-command 或 NOVEL_AUDIT_COMMAND 提供生成 correction Delta 的命令。"
-        update_audit_status(paths, status="failed", failure_reason=reason)
-        print(reason)
-        return 1
-
-    # retries excludes the initial audit; 3 retries therefore permits 4 attempts.
-    attempt = 0
-    while attempt <= governance_retries:
-        attempt += 1
-        update_audit_status(paths, status="running", attempt=attempt, correction_path=str(paths["correction"]))
-        worker_rc, worker_report = run_audit_worker(
-            audit_command, project_dir, paths, start, end, attempt, audit_timeout_seconds
-        )
-        if worker_rc == 0:
-            governance_rc = commit_governance(project_dir, str(paths["correction"]))
-            if governance_rc == 0:
-                update_audit_status(paths, status="committed", auto_attempts=attempt, worker_report=str(worker_report))
-                print(f"周期审计 {start:03d}-{end:03d} 已自动治理并通过校验。")
-                return 0
-            reason = "治理补丁未通过提交链路；审计器须根据当前结构和校验结果生成新的 correction Delta。"
-        else:
-            reason = (
-                f"自动审计器执行超时（{audit_timeout_seconds:g} 秒）。"
-                if worker_rc == 124 else f"自动审计器退出码为 {worker_rc}。"
-            )
-
-        write_audit_feedback(paths, attempt, reason, worker_report)
+    if not paths["correction"].is_file() or paths["correction"].stat().st_size == 0:
         update_audit_status(
             paths,
-            status="retrying",
-            attempt=attempt,
-            failure_reason=reason,
-            worker_report=str(worker_report),
-            feedback_path=str(paths["feedback"]),
+            status="awaiting_agent",
+            action="读取审计任务包，产出真实 correction Delta，然后再次运行 run_pipeline.py run。",
         )
-        if attempt <= governance_retries:
-            if retry_delay > 0:
-                time.sleep(retry_delay)
+        print(f"周期审计 {start:03d}-{end:03d} 待Agent处理：{paths['pack']}")
+        print(f"请产出真实治理补丁：{paths['correction']}")
+        return 2
 
-    update_audit_status(paths, status="failed", attempt=attempt, failure_reason=reason)
-    print(f"周期审计 {start:03d}-{end:03d} 自动治理未成功；未进入后续章节。")
-    return 1
+    rc = commit_governance(project_dir, str(paths["correction"]))
+    if rc == 0:
+        print(f"周期审计 {start:03d}-{end:03d} 治理补丁已提交并通过校验。")
+        return 0
+
+    update_audit_status(
+        paths,
+        status="awaiting_agent",
+        action="读取治理校验报告，修复 correction Delta，然后再次运行 run_pipeline.py run。",
+    )
+    print(f"周期审计 {start:03d}-{end:03d} 治理补丁未通过；待Agent修复后重试。")
+    return 2
 
 
 def mark_periodic_audit_committed(project_dir: Path, patch: Path, before: Path, after: Path, diff: Path) -> None:
@@ -793,129 +720,103 @@ def mark_periodic_audit_committed(project_dir: Path, patch: Path, before: Path, 
     save_json(status_path, data)
 
 
-def prepare_chapter(project_dir: Path, seq: Optional[int] = None, force: bool = False) -> int:
+def prepare_chapter_analysis(project_dir: Path, chapter: Path, force: bool = False) -> int:
+    init_dirs(project_dir)
+    if not guard_single_unit_artifacts(project_dir):
+        return 1
+    ensure_story(project_dir)
+    p = artifact_paths(project_dir, chapter)
+    if p["analysis_task"].exists() and not force:
+        print(f"章节分析任务包已存在: {p['analysis_task']}")
+        print(f"请只填写章节分析MD: {p['analysis']}")
+        return 0
+    chapter_text = chapter.read_text(encoding="utf-8", errors="ignore")
+    chapter_seq = seq_from_file(chapter)
+    content = render_prompt(
+        "chapter_analysis.j2",
+        chapter_seq=chapter_seq,
+        analysis_path=p["analysis"],
+        chapter_text=chapter_text,
+    )
+    p["analysis_task"].parent.mkdir(parents=True, exist_ok=True)
+    p["analysis_task"].write_text(content, encoding="utf-8")
+    print(f"已生成章节分析任务包: {p['analysis_task']}")
+    print(f"请填写章节分析MD: {p['analysis']}")
+    return 0
+
+
+def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False) -> int:
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
         return 1
     story = ensure_story(project_dir)
+    p = artifact_paths(project_dir, chapter)
+    if not p["analysis"].is_file():
+        print(f"缺章节分析MD: {p['analysis']}")
+        return 2
+    if p["delta_task"].exists() and not force:
+        print(f"Delta提取任务包已存在: {p['delta_task']}")
+        print(f"请只填写本章Delta JSON: {p['delta']}")
+        return 0
+    chapter_seq = seq_from_file(chapter)
+    chapter_id = str(chapter_seq).zfill(4)
+    chapter_time_str = chapter_time(chapter_seq)
+    chapter_text = chapter.read_text(encoding="utf-8", errors="ignore")
+    analysis_text = p["analysis"].read_text(encoding="utf-8", errors="ignore")
+    summary = build_lightweight_index(story)
+
+    content = render_prompt(
+        "delta_extract.j2",
+        chapter_seq=chapter_seq,
+        chapter_id=chapter_id,
+        delta_path=p["delta"],
+        summary=summary,
+        analysis_text=analysis_text,
+        chapter_text=chapter_text,
+        chapter_time=chapter_time_str,
+    )
+
+    p["delta_task"].parent.mkdir(parents=True, exist_ok=True)
+    p["delta_task"].write_text(content, encoding="utf-8")
+    print(f"已生成Delta提取任务包: {p['delta_task']}")
+    print(f"请填写本章Delta JSON: {p['delta']}")
+    return 0
+
+
+def prepare_chapter(project_dir: Path, seq: Optional[int] = None, force: bool = False) -> int:
+    init_dirs(project_dir)
+    if not guard_single_unit_artifacts(project_dir):
+        return 1
     chapter = chapter_by_seq(project_dir, seq) if seq else next_incomplete(project_dir)
     if not chapter:
         print("没有待处理章节。")
         return 0
     p = artifact_paths(project_dir, chapter)
-    if p["task"].exists() and not force:
-        print(f"任务包已存在: {p['task']}")
-        print(f"请填写：\n  章节分析MD: {p['analysis']}\n  Delta JSON: {p['delta']}")
-        return 0
-    chapter_text = chapter.read_text(encoding="utf-8", errors="ignore")
-    summary = build_lightweight_index(story)
-    chapter_seq = seq_from_file(chapter)
-    chapter_id = str(chapter_seq).zfill(4)
-    content = f"""# 第{chapter_seq:03d}章拆书任务包
-
-## 你需要产出两个文件
-
-1. 章节分析MD：`{p['analysis']}`
-2. 本章Delta JSON：`{p['delta']}`
-
-请先写章节分析MD，再根据“当前故事结构索引 + 本章原文 + 章节分析MD”写Delta JSON。不要输出完整故事结构JSON。
-
-## 当前故事结构索引
-
-```text
-{summary}
-```
-
-## 章节分析MD模板
-
-章节分析器先输出 MD，不输出 JSON。建议使用以下 10 个部分：
-
-```markdown
-# 第{chapter_seq:03d}章 {{标题}}
-
-## 1. 剧情梗概
-约500字，概括本章主要事件、人物行为、情节转折。
-
-## 2. 出场人物
-- 人物A：本章行为、情绪状态、关系变化、是否首次出现。
-
-## 3. 核心冲突
-冲突双方、冲突目标、冲突推进方式。
-
-## 4. 信息增量
-新增世界观、人物背景、地点、阵营、规则、线索或设定。
-
-## 5. 伏笔与悬念
-伏笔、悬念、后续可能回收点、证据原文。
-
-## 6. 爽点 / 虐点 / 情绪点
-压抑、期待、羞辱、反击、打脸、逆袭、热血、悬念、感动、虐心、危机感、成就感等。
-
-## 7. 章节功能判断
-开篇铺垫/冲突升级/人物塑造/世界观展开/高潮推进/转折/收束/过渡等。
-
-## 8. 事件分组与标签建议
-事件分组推荐：`段号-剧情段名+剧情线主题+叙事功能+爽点情绪点+冲突悬念类型`。
-示例：`0010-退婚事件+情感尊严线+冲突爆发+羞辱反击+身份与尊严`。
-可复用分类写入标签：`剧情线主题:*`、`爽点情绪点:*`、`冲突悬念类型:*`、`画面类型:*`、`视觉用途:*`。
-
-## 9. 画面 / 分镜 / 视觉资产候选
-| 候选编号 | 对应事件 | 画面价值 | 画面类型 | 核心画面 | 出场人物 | 地点 | 关键物品 | 情绪氛围 | 镜头建议 | 是否进入视觉资产 |
-|----------|----------|----------|----------|----------|----------|------|----------|----------|----------|------------------|
-
-## 10. 结构提取提示
-列出最应该进入故事结构JSON的角色、事件、地点、线索、阵营、物品、其他事项。
-```
-
-## Delta JSON硬格式
-
-```json
-{{
-  "章节": "第{chapter_seq:03d}章",
-  "新增元素": {{"角色集": [], "事件集": [], "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []}},
-  "修改元素": {{"角色集": [], "事件集": [], "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []}}
-}}
-```
-
-要求：
-- 这是逐切片任务；本Delta只能对应第{chapter_seq:03d}个拆分单元，禁止合并多个章节/编号/小节。
-- 新增元素必须补齐所有标准字段。
-- 非标准信息必须放入详情，不要放在元素顶层。
-- 详情键名不能有标点、空格、下划线；详情值只能是字符串或“类型:名称”的字符串数组。
-- 每个新增或修改元素的详情必须填写非空 `提取理由`。它用于Delta、章节分析和治理补丁追溯，不会合并进最终元素JSON。
-- 角色必须有 `生日`：未知固定写 `0001-01-01T00:00:00`。角色、地点、线索、阵营、物品必须在 `详情` 内提供四位字符串 `首次章节`、`最近章节`，例如 `"{chapter_id}"`。
-- 事件必须在 `详情` 内提供 `涉及章节`（固定宽度、升序、中文逗号，例如 `"{chapter_id}"`）并在顶层提供 `时间`。本章新事件时间固定为 `{chapter_time(chapter_seq)}`；时间是章节时间，不是原著日历。
-- 事件分组使用连续剧情段。延续既有剧情段时复用其完整 `分组`；新剧情段推荐写 `剧情段名+剧情线主题+叙事功能+爽点情绪点+冲突悬念类型`，不可只写章节号或纯编号，合并后自动生成 `0010-退婚事件+情感尊严线+冲突爆发+羞辱反击+身份与尊严` 形式的段号。
-- `详情.剧情段` 可自由使用 `-` 补充人物、势力、地点、冲突、目标、功能、爽点情绪点和冲突悬念类型；有正式线索关联时写 `详情.关联线索`，例如 `["线索:退婚约定"]`。
-- 视觉资产入口写入 `标签集`，如 `画面类型:冲突对峙`、`视觉用途:封面候选`；具体视觉生产资料写入字符串详情字段：`视觉等级`、`画面类型`、`核心画面`、`镜头建议`、`氛围`、`视觉理由`、`视觉用途`。
-- 过程阶段允许未来事件/人物暂未出现，但最终前必须补齐或移入详情.待确认信息。
-- 不能为了满足数量要求编造原文没有的元素。
-
-## 本章原文
-
-```markdown
-{chapter_text}
-```
-"""
-    p["task"].parent.mkdir(parents=True, exist_ok=True)
-    p["task"].write_text(content, encoding="utf-8")
-    print(f"已生成章节任务包: {p['task']}")
-    print(f"请填写：\n  {p['analysis']}\n  {p['delta']}")
+    if not p["analysis"].is_file():
+        return prepare_chapter_analysis(project_dir, chapter, force)
+    if not p["delta"].is_file():
+        return prepare_chapter_delta(project_dir, chapter, force)
+    print(f"第{seq_from_file(chapter):03d}章的章节分析MD和Delta JSON均已存在。")
     return 0
 
 
 def write_repair_pack(project_dir: Path, chapter: Path, reason: str, report_paths: List[Path]) -> None:
     p = artifact_paths(project_dir, chapter)
-    parts = [f"# 第{seq_from_file(chapter):03d}章修复任务", "", f"失败原因：{reason}", ""]
+    reports: List[Dict[str, str]] = []
     for rp in report_paths:
         if rp.is_file():
-            parts.append(f"## 报告：{rp.name}")
-            parts.append("```text")
-            parts.append(rp.read_text(encoding="utf-8", errors="ignore")[:30000])
-            parts.append("```")
-    parts.append("请只修复本章 Delta JSON，不要重写完整故事结构JSON。")
+            reports.append({
+                "name": rp.name,
+                "excerpt": rp.read_text(encoding="utf-8", errors="ignore")[:30000],
+            })
+    content = render_prompt(
+        "repair_chapter.j2",
+        chapter_seq=seq_from_file(chapter),
+        reason=reason,
+        reports=reports,
+    )
     p["repair"].parent.mkdir(parents=True, exist_ok=True)
-    p["repair"].write_text("\n".join(parts), encoding="utf-8")
+    p["repair"].write_text(content, encoding="utf-8")
     print(f"已生成修复任务包: {p['repair']}")
 
 
@@ -935,11 +836,22 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
     if not p["analysis"].is_file():
         print(f"缺章节分析MD: {p['analysis']}")
         prepare_chapter(project_dir, seq)
+        print("已交接：等待章节分析MD。")
         return 2
     if not p["delta"].is_file():
         print(f"缺Delta JSON: {p['delta']}")
         prepare_chapter(project_dir, seq)
+        print("已交接：等待基于章节分析的Delta JSON。")
         return 2
+
+    # 入库前先做确定性标签压缩，把受控前缀标签和超限自由标签搬到 详情.补充标签，
+    # 让原本因 taxonomy 失配进 repair 循环的报错根本不发生。
+    compress_delta_report = project_dir / "质量治理" / "delta校验" / f"compress_ch{seq:03d}.json"
+    rc = run_cmd([sys.executable, str(script_path("compress_tags.py")), "--delta", str(p["delta"]), "--report", str(compress_delta_report)])
+    if rc != 0:
+        print(f"Delta 标签压缩失败，见: {compress_delta_report}")
+        write_repair_pack(project_dir, chapter, "compress_tags.py(Delta)失败", [compress_delta_report])
+        return 1
 
     # 入库前校验
     rc = run_cmd([sys.executable, str(script_path("validate_delta.py")), "--mode", "process", "--report-json", str(p["delta_report"]), str(story), str(p["delta"])])
@@ -961,6 +873,15 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
 
     # 合并后保全式规范化，不隔离前向引用，避免过程信息丢失。
     run_cmd([sys.executable, str(script_path("normalize_story_schema.py")), str(story), "--in-place", "--report", str(project_dir / "质量治理" / "规范化" / f"normalize_ch{seq:03d}.txt")])
+
+    # 合并后再压一次：跨章累积的标签集即使每章入口已合规，也可能因新 Delta 与既有元素合并而越过上限。
+    compress_struct_report = project_dir / "质量治理" / "规范化" / f"compress_after_ch{seq:03d}.json"
+    rc = run_cmd([sys.executable, str(script_path("compress_tags.py")), "--structure", str(story), "--report", str(compress_struct_report)])
+    if rc != 0:
+        shutil.copy2(backup_tmp, story)
+        print(f"合并后标签压缩失败，已回滚，见: {compress_struct_report}")
+        write_repair_pack(project_dir, chapter, "compress_tags.py(Structure)失败", [compress_struct_report])
+        return 1
 
     rc = run_cmd([sys.executable, str(script_path("validate_structure.py")), "--chapter-check", "--mode", "process", "--report-json", str(p["chapter_report"]), str(story), str(p["delta"])])
     if rc != 0:
@@ -1012,7 +933,10 @@ def cmd_resume(project_dir: Path) -> int:
         for key in ["analysis", "delta", "delta_report", "chapter_report", "before", "after", "diff"]:
             status = "[x]" if p[key].is_file() and p[key].stat().st_size > 0 else "[ ]"
             print(f"  {status} {key}: {p[key]}")
-        print(f"任务包: {p['task']}")
+        if not p["analysis"].is_file():
+            print(f"章节分析任务包: {p['analysis_task']}")
+        elif not p["delta"].is_file():
+            print(f"Delta提取任务包: {p['delta_task']}")
     else:
         print("所有章节均已可信完成。")
     return 0
@@ -1022,32 +946,13 @@ def cmd_run(
     project_dir: Path,
     max_chapters: int = 0,
     audit_interval: int = 5,
-    audit_command: str = "",
-    governance_retries: int = 3,
-    governance_retry_delay: float = 0,
-    audit_timeout_seconds: float = DEFAULT_AUDIT_TIMEOUT_SECONDS,
 ) -> int:
-    if governance_retries < 0:
-        print("governance_retries 必须为非负整数。")
-        return 2
-    if not 600 <= audit_timeout_seconds <= 1800:
-        print("audit_timeout_seconds 必须在 600 到 1800 秒之间。")
-        return 2
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
         return 1
     ensure_story(project_dir)
-    audit_command = audit_command or os.environ.get("NOVEL_AUDIT_COMMAND", "")
     for audit in unresolved_audits(project_dir):
-        rc = run_periodic_governance(
-            project_dir,
-            audit["_start"],
-            audit["_end"],
-            audit_command,
-            governance_retries,
-            governance_retry_delay,
-            audit_timeout_seconds,
-        )
+        rc = run_periodic_governance(project_dir, audit["_start"], audit["_end"])
         if rc != 0:
             return rc
     processed = 0
@@ -1058,9 +963,13 @@ def cmd_run(
             return 0
         seq = seq_from_file(nxt)
         p = artifact_paths(project_dir, nxt)
-        if not p["analysis"].is_file() or not p["delta"].is_file():
+        if not p["analysis"].is_file():
             prepare_chapter(project_dir, seq)
-            print("已暂停：等待模型/人工填写章节分析MD和Delta JSON。")
+            print("已交接：等待章节分析MD。")
+            return 2
+        if not p["delta"].is_file():
+            prepare_chapter(project_dir, seq)
+            print("已交接：等待基于章节分析的Delta JSON。")
             return 2
         rc = commit_chapter(project_dir, seq)
         if rc != 0:
@@ -1068,15 +977,7 @@ def cmd_run(
         processed += 1
         if audit_interval and seq % audit_interval == 0:
             start = seq - audit_interval + 1
-            rc = run_periodic_governance(
-                project_dir,
-                start,
-                seq,
-                audit_command,
-                governance_retries,
-                governance_retry_delay,
-                audit_timeout_seconds,
-            )
+            rc = run_periodic_governance(project_dir, start, seq)
             if rc != 0:
                 return rc
         if max_chapters and processed >= max_chapters:
@@ -1154,49 +1055,10 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
 
     # 收集材料生成任务包
     task_pack = audit_dir / "final_task_pack.md"
-    sections: List[str] = [
-        "# 最终结构整理任务包",
-        "",
-        "## 目标",
-        "",
-        "将过程型 `故事结构_草稿.json` 整理为最终交付型 `故事结构.json`。",
-        "修正所有校验错误和警告，完成全局去重、别名合并、路人降级、事件粒度统一等整理工作。",
-        "",
-        "## 产出要求",
-        "",
-        "- 直接修改 `故事结构_草稿.json`",
-        "- 修改完成后运行：",
-        "",
-        "```bash",
-        f"python {script_path('run_pipeline.py')} commit-final-draft {project_dir}",
-        "```",
-        "",
-        "- 如果校验失败，根据修复任务包继续修正，再次提交",
-        "- 最终通过后运行：",
-        "",
-        "```bash",
-        f"python {script_path('run_pipeline.py')} finalize {project_dir}",
-        "```",
-        "",
-        "## 当前校验报告",
-        "",
-    ]
-    if report.is_file():
-        sections.extend(["```text", read_excerpt(report, 30000), "```", ""])
-    else:
-        sections.extend(["（校验报告未生成）", ""])
 
-    sections.extend([
-        "## 当前故事结构索引",
-        "",
-        "```text",
-        build_lightweight_index(draft),
-        "```",
-        "",
-    ])
+    report_excerpt = read_excerpt(report, 30000) if report.is_file() else ""
 
-    # 全书分析报告
-    analysis_refs = [
+    analysis_specs = [
         ("全书分析/剧情结构/章节梗概汇总.md", "章节梗概汇总"),
         ("全书分析/人物分析/人物档案.md", "人物档案"),
         ("全书分析/人物分析/人物关系.md", "人物关系"),
@@ -1205,50 +1067,37 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
         ("全书分析/视觉资产/视觉资产清单.md", "视觉资产清单"),
         ("全书分析/视觉资产/关键场景分镜表.md", "关键场景分镜表"),
     ]
-    has_analysis = False
-    for rel, title in analysis_refs:
+    analysis_refs: List[Dict[str, Any]] = []
+    for rel, title in analysis_specs:
         path = project_dir / rel
         if path.is_file() and path.stat().st_size > 0:
-            if not has_analysis:
-                sections.extend(["## 全书分析参考", ""])
-                has_analysis = True
-            sections.extend([f"### {title}", "", f"文件：`{path}`", "",
-                             "```markdown", read_excerpt(path, 15000), "```", ""])
+            analysis_refs.append({
+                "title": title,
+                "path": path,
+                "excerpt": read_excerpt(path, 15000),
+            })
 
-    # 周期审计报告
+    audit_refs: List[Dict[str, Any]] = []
     pa_dir = project_dir / "质量治理" / "周期审计"
     if pa_dir.is_dir():
-        audit_mds = sorted(pa_dir.glob("audit_*.md"))
-        corr_jsons = sorted(pa_dir.glob("correction_*.json"))
-        if audit_mds or corr_jsons:
-            sections.extend(["## 周期审计参考", ""])
-            for md in audit_mds:
-                sections.extend([f"### {md.name}", "",
-                                 "```markdown", read_excerpt(md, 8000), "```", ""])
-            for cj in corr_jsons:
-                sections.extend([f"### {cj.name}", "",
-                                 "```json", read_excerpt(cj, 8000), "```", ""])
+        for md in sorted(pa_dir.glob("audit_*.md")):
+            audit_refs.append({"name": md.name, "lang": "markdown",
+                               "excerpt": read_excerpt(md, 8000)})
+        for cj in sorted(pa_dir.glob("correction_*.json")):
+            audit_refs.append({"name": cj.name, "lang": "json",
+                               "excerpt": read_excerpt(cj, 8000)})
 
-    sections.extend([
-        "## 整理清单",
-        "",
-        "请重点处理以下方面：",
-        "",
-        "1. 交叉引用缺失或指向别名而非正式名称",
-        "2. 重复元素合并",
-        "3. 别名合并到主元素",
-        "4. 路人角色降级或清理",
-        "5. 事件粒度不统一",
-        "6. 伏笔/线索泛化",
-        "7. 详情字段不规范（键名不能有标点/空格/下划线，值只能是字符串或字符串数组）",
-        "8. 非标准字段迁入详情",
-        "9. 地点/阵营层级整理、分组统筹；事件分组优先采用 段号-剧情段名+剧情线主题+叙事功能+爽点情绪点+冲突悬念类型",
-        "10. 数量仅作为丰富度参考，不作为拆书提取硬门槛。",
-        "11. 如果原文不足，不得为达标新增元素。",
-        "",
-    ])
+    content = render_prompt(
+        "final_draft.j2",
+        run_pipeline_path=script_path("run_pipeline.py"),
+        project_dir=project_dir,
+        report_excerpt=report_excerpt,
+        story_index=build_lightweight_index(draft),
+        analysis_refs=analysis_refs,
+        audit_refs=audit_refs,
+    )
 
-    task_pack.write_text("\n".join(sections), encoding="utf-8")
+    task_pack.write_text(content, encoding="utf-8")
     print(f"已生成最终整理任务包: {task_pack}")
     print(f"校验报告: {report}")
     print(f"草稿文件: {draft}")
@@ -1280,31 +1129,13 @@ def cmd_commit_final_draft(project_dir: Path) -> int:
     if rc != 0:
         print(f"最终校验失败，见: {report}")
         repair = audit_dir / "repair_final.md"
-        parts = [
-            "# 最终结构修复任务",
-            "",
-            "## 校验失败",
-            "",
-            "`故事结构_草稿.json` 未通过 `--strict` 校验。请根据以下报告修正后再次提交。",
-            "",
-            "## 校验报告",
-            "",
-            "```text",
-            read_excerpt(report, 30000),
-            "```",
-            "",
-            "## 修正要求",
-            "",
-            "- 直接修改 `故事结构_草稿.json`",
-            "- 只修正校验报告中指出的问题",
-            "- 不要为了满足数量要求编造原文没有的元素",
-            "- 修正后再次运行：",
-            "",
-            "```bash",
-            f"python {script_path('run_pipeline.py')} commit-final-draft {project_dir}",
-            "```",
-        ]
-        repair.write_text("\n".join(parts), encoding="utf-8")
+        content = render_prompt(
+            "repair_final.j2",
+            report_excerpt=read_excerpt(report, 30000),
+            run_pipeline_path=script_path("run_pipeline.py"),
+            project_dir=project_dir,
+        )
+        repair.write_text(content, encoding="utf-8")
         print(f"已生成修复任务包: {repair}")
         return 1
 
@@ -1410,7 +1241,95 @@ def cmd_analysis_pack(args: argparse.Namespace) -> int:
         cmd.extend(["--question", args.question])
     if args.out_dir:
         cmd.extend(["--out-dir", args.out_dir])
+    if getattr(args, "per_chapter", False):
+        cmd.append("--per-chapter")
+    if getattr(args, "aggregate", False):
+        cmd.append("--aggregate")
     return run_cmd(cmd)
+
+
+def visual_assets_per_chapter_relpaths(seq: int) -> List[str]:
+    """与 analysis_context_pack.visual_assets_per_chapter_outputs 保持同步的相对路径。"""
+    base = f"全书分析/视觉资产/分章/ch{seq:03d}"
+    return [
+        f"{base}/视觉资产清单.md",
+        f"{base}/关键场景分镜表.md",
+        f"{base}/AI绘图提示词素材.md",
+        f"{base}/角色外观一致性表.md",
+        f"{base}/场景氛围表.md",
+    ]
+
+
+def chapter_has_per_chapter_visual(project_dir: Path, seq: int) -> bool:
+    for rel in visual_assets_per_chapter_relpaths(seq):
+        path = project_dir / rel
+        if not (path.is_file() and path.stat().st_size > 0):
+            return False
+    return True
+
+
+def chapters_eligible_for_visual(project_dir: Path) -> List[int]:
+    """已经有章节分析MD的章节才能跑视觉资产。"""
+    result: List[int] = []
+    for ch in chapter_files(project_dir):
+        seq = seq_from_file(ch)
+        analysis = project_dir / "章节处理" / ch.name
+        if analysis.is_file() and analysis.stat().st_size > 0:
+            result.append(seq)
+    return result
+
+
+def cmd_visual_assets_auto(args: argparse.Namespace) -> int:
+    """按章自主推进视觉资产生成；遇到缺产物的章节返回 2 等主控Agent写入。"""
+    project_dir = Path(args.project_dir)
+    init_dirs(project_dir)
+    eligible = chapters_eligible_for_visual(project_dir)
+    if not eligible:
+        print("尚无任何章节具备章节分析MD；请先完成章节分析后再运行 visual-assets-auto。")
+        return 1
+
+    pending = [seq for seq in eligible if not chapter_has_per_chapter_visual(project_dir, seq)]
+    if pending:
+        # 取第一个待办章节生成单章任务包
+        next_seq = pending[0]
+        cmd = [
+            sys.executable,
+            str(script_path("analysis_context_pack.py")),
+            str(project_dir),
+            "--task", "visual_assets",
+            "--chapters", str(next_seq),
+            "--per-chapter",
+            "--include-original", args.include_original,
+            "--max-pack-chars", str(args.max_pack_chars),
+            "--max-original-chars", str(args.max_original_chars),
+            "--max-analysis-chars", str(args.max_analysis_chars),
+        ]
+        rc = run_cmd(cmd)
+        if rc != 0:
+            return rc
+        remaining = len(pending) - 1
+        print(f"已生成第{next_seq:03d}章视觉资产任务包；剩余 {remaining} 章待生成。")
+        print("请主控Agent按 reduce_prompt 写入分章五件套后再次运行。")
+        return 2
+
+    # 全部分章产物齐全，生成 aggregate 任务包
+    aggregate_marker = project_dir / "全书分析" / "视觉资产" / "视觉资产清单.md"
+    if aggregate_marker.is_file() and aggregate_marker.stat().st_size > 0 and not getattr(args, "force_aggregate", False):
+        print("所有章节分章视觉资产已生成，且顶层汇总已存在。使用 --force-aggregate 重新生成 aggregate 任务包。")
+        return 0
+
+    cmd = [
+        sys.executable,
+        str(script_path("analysis_context_pack.py")),
+        str(project_dir),
+        "--task", "visual_assets",
+        "--aggregate",
+    ]
+    rc = run_cmd(cmd)
+    if rc != 0:
+        return rc
+    print("所有章节分章视觉资产已生成；已交接：等待主控Agent按 aggregate 任务包写入顶层五件套。")
+    return 2
 
 
 def cmd_analysis_status(args: argparse.Namespace) -> int:
@@ -1458,7 +1377,7 @@ def main() -> int:
     p_split.add_argument("--pattern", default="")
     p_split.add_argument("--preface-mode", choices=["separate", "attach", "chapter", "drop"], default="")
 
-    p_prepare = sub.add_parser("prepare-chapter", help="生成单章模型任务包")
+    p_prepare = sub.add_parser("prepare-chapter", help="根据当前产物状态生成章节分析或Delta提取任务包")
     p_prepare.add_argument("project_dir")
     p_prepare.add_argument("--chapter", type=int, default=0)
     p_prepare.add_argument("--force", action="store_true")
@@ -1468,14 +1387,10 @@ def main() -> int:
     p_commit.add_argument("--chapter", type=int, required=True)
     p_commit.add_argument("--force", action="store_true")
 
-    p_run = sub.add_parser("run", help="持续提交已具备产物的章节，并在周期点自动审计、治理和校验")
+    p_run = sub.add_parser("run", help="持续提交已具备产物的章节；周期审计任务由主控Agent处理后续提交")
     p_run.add_argument("project_dir")
     p_run.add_argument("--max-chapters", type=int, default=0)
     p_run.add_argument("--audit-interval", type=int, default=5, help="每N章执行一次自动周期治理；0表示关闭")
-    p_run.add_argument("--audit-command", default=os.environ.get("NOVEL_AUDIT_COMMAND", ""), help="自动审计器命令模板，可使用 {project_dir}、{audit_pack}、{correction_path}、{feedback_path}、{chapter_start}、{chapter_end}、{attempt}")
-    p_run.add_argument("--governance-retries", type=non_negative_int, default=3, help="自动治理失败后的最大重试次数；默认3（最多共尝试4次），0表示不重试")
-    p_run.add_argument("--governance-retry-delay", type=float, default=0, help="自动治理重试间隔秒数")
-    p_run.add_argument("--audit-timeout-seconds", type=audit_timeout_seconds_arg, default=DEFAULT_AUDIT_TIMEOUT_SECONDS, help="单次外部自动审计器超时秒数，范围600-1800，默认900")
 
     p_resume = sub.add_parser("resume", help="查看下一步缺什么")
     p_resume.add_argument("project_dir")
@@ -1515,9 +1430,19 @@ def main() -> int:
     p_pack.add_argument("--max-original-chars", type=int, default=6000)
     p_pack.add_argument("--max-analysis-chars", type=int, default=12000)
     p_pack.add_argument("--out-dir", default="")
+    p_pack.add_argument("--per-chapter", action="store_true", help="（仅 visual_assets）每章一份独立任务包，产物写入 全书分析/视觉资产/分章/chNNN/")
+    p_pack.add_argument("--aggregate", action="store_true", help="（仅 visual_assets）生成顶层汇总任务包，从 分章/chNNN/ 合并顶层五件套")
 
     p_status = sub.add_parser("analysis-status", help="查看全书/局部分析状态")
     p_status.add_argument("project_dir")
+
+    p_vauto = sub.add_parser("visual-assets-auto", help="按章自主推进视觉资产生成（每次返回2交接一章，全部完成后交接aggregate）")
+    p_vauto.add_argument("project_dir")
+    p_vauto.add_argument("--include-original", choices=["none", "sample", "full"], default="sample")
+    p_vauto.add_argument("--max-pack-chars", type=int, default=70000)
+    p_vauto.add_argument("--max-original-chars", type=int, default=6000)
+    p_vauto.add_argument("--max-analysis-chars", type=int, default=12000)
+    p_vauto.add_argument("--force-aggregate", action="store_true", help="即便顶层汇总已存在，也重新生成 aggregate 任务包")
 
     p_fpack = sub.add_parser("final-pack", help="生成最终结构整理任务包（复制增量为草稿+校验+打包参考材料）")
     p_fpack.add_argument("project_dir")
@@ -1545,7 +1470,7 @@ def main() -> int:
     if args.cmd == "commit-chapter":
         return commit_chapter(project_dir, args.chapter, args.force)
     if args.cmd == "run":
-        return cmd_run(project_dir, args.max_chapters, args.audit_interval, args.audit_command, args.governance_retries, args.governance_retry_delay, args.audit_timeout_seconds)
+        return cmd_run(project_dir, args.max_chapters, args.audit_interval)
     if args.cmd == "resume":
         return cmd_resume(project_dir)
     if args.cmd == "recover-story":
@@ -1562,6 +1487,8 @@ def main() -> int:
         return cmd_analysis_pack(args)
     if args.cmd == "analysis-status":
         return cmd_analysis_status(args)
+    if args.cmd == "visual-assets-auto":
+        return cmd_visual_assets_auto(args)
     if args.cmd == "final-pack":
         return cmd_final_pack(project_dir, getattr(args, "force", False))
     if args.cmd == "commit-final-draft":

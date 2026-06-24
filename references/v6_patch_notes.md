@@ -69,7 +69,7 @@ python scripts/run_pipeline.py run <项目目录>
 `run` 的真实语义：
 
 - 如果某章的章节分析MD和Delta JSON已经存在，则自动校验、合并、规范化、快照、diff、更新进度。
-- 如果缺章节分析MD或Delta JSON，则生成任务包并暂停。
+- 如果缺章节分析MD，则生成 `task_chNNN_analysis.md`；MD完成后缺Delta JSON，则生成 `task_chNNN_delta.md`。两个任务包分别对应两次模型分析。
 - 脚本不假装能自己调用大模型；它保证的是“可断点、可恢复、知道停在哪里、知道缺什么”。
 
 ## 5. 失败修复任务包
@@ -131,12 +131,12 @@ python scripts/run_pipeline.py commit-governance <项目目录> <治理补丁.js
 
 ```bash
 python scripts/run_pipeline.py split <项目目录> <原文文件>
-python scripts/run_pipeline.py run <项目目录> --audit-command "<自动审计器命令模板>"
+python scripts/run_pipeline.py run <项目目录>
 ```
 
-自动审计器接收 `audit_pack`、`correction_path` 和 `feedback_path` 等模板变量，负责产生周期治理 Delta。周期审计会自动重试并在 `validate_delta`、`merge_delta`、`apply_governance_ops`、`validate_structure` 全部通过后继续下一章；不会等待人工提交 `correction`。
+本版本改为 Agent-first 接力：周期点生成审计任务包后，`run` 返回 `2`；主控Agent直接产出真实 `correction_XXX.json` 并再次运行 `run`。随后脚本执行 `validate_delta`、`merge_delta`、`apply_governance_ops`、`validate_structure`，全部通过后继续下一章。
 
-未配置自动审计器时，周期点会失败关闭，避免未治理的结构污染后续章节。`commit-governance` 仍可用于手工覆盖自动补丁，且其报告继续保存到 `质量治理/按需治理/`；自动周期补丁的报告保存在 `质量治理/周期审计/`。
+周期审计不再依赖外部 worker。缺少或无效补丁时，流程保持在待办状态，不会越过审计进入下一章。`commit-governance` 仍可用于单独提交按需治理补丁，其报告保存到 `质量治理/按需治理/`；周期补丁的报告保存在 `质量治理/周期审计/`。
 
 当 `run` 暂停时，打开任务包，产出它要求的两个文件：
 

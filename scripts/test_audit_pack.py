@@ -2,6 +2,7 @@
 """周期审计任务包与 run 自动暂停行为测试。"""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,7 +12,7 @@ ROOT = Path(__file__).resolve().parent
 RUNNER = ROOT / "run_pipeline.py"
 sys.path.insert(0, str(ROOT))
 
-from run_pipeline import cmd_run, commit_governance, run_audit_worker, run_periodic_governance
+from run_pipeline import cmd_run, commit_governance
 
 
 def write_json(path, data):
@@ -50,45 +51,21 @@ def write_completed_chapter(project, seq):
     (project / "章节处理" / chapter.name).write_text(f"# 第{seq:03d}章分析\n", encoding="utf-8")
     write_json(project / "章节处理" / f"{base}.json", empty_delta(seq))
     for rel in [
-        f"质量治理/delta校验/{base}.txt",
-        f"质量治理/章节校验/{base}.txt",
+        f"质量治理/delta校验/{base}.json",
+        f"质量治理/章节校验/{base}.json",
         f"故事结构版本/story_before_ch{seq:03d}.json",
         f"故事结构版本/story_after_ch{seq:03d}.json",
         f"结构变更日志/diff_ch{seq:03d}.json",
     ]:
         path = project / rel
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.suffix == ".json":
+        if "校验" in str(path):
+            write_json(path, {"passed": True, "mode": "process", "errors": [], "warnings": []})
+        elif path.suffix == ".json":
             write_json(path, empty_story())
         else:
             path.write_text("ok\n", encoding="utf-8")
     return chapter
-
-
-def write_auto_auditor(project):
-    auditor = project / "auto_auditor.py"
-    auditor.write_text(
-        """import json
-import sys
-from pathlib import Path
-
-correction = Path(sys.argv[1])
-attempt_file = Path(sys.argv[2])
-attempts = int(attempt_file.read_text(encoding=\"utf-8\")) if attempt_file.exists() else 0
-attempts += 1
-attempt_file.write_text(str(attempts), encoding=\"utf-8\")
-if attempts == 1:
-    raise SystemExit(1)
-empty = {key: [] for key in [\"角色集\", \"事件集\", \"地点集\", \"线索集\", \"阵营集\", \"物品集\"]}
-correction.write_text(json.dumps({\"章节范围\": \"第001章-第005章\", \"新增元素\": empty, \"修改元素\": empty}, ensure_ascii=False), encoding=\"utf-8\")
-""",
-        encoding="utf-8",
-    )
-    attempts = project / "audit_attempts.txt"
-    command = '"{}" "{}" "{{correction_path}}" "{}"'.format(
-        sys.executable, auditor, attempts
-    )
-    return command, attempts
 
 
 def test_audit_pack_cli_creates_review_package():
@@ -98,11 +75,16 @@ def test_audit_pack_cli_creates_review_package():
         for seq in range(1, 6):
             write_completed_chapter(project, seq)
 
+        env = dict(os.environ)
+        env["PYTHONIOENCODING"] = "utf-8"
         result = subprocess.run(
             [sys.executable, str(RUNNER), "audit-pack", str(project), "--chapters", "1-5"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=env,
         )
         assert result.returncode == 0, result.stdout
 
@@ -119,7 +101,7 @@ def test_audit_pack_cli_creates_review_package():
     print("[OK] audit-pack CLI 生成周期审计任务包")
 
 
-def test_run_retries_periodic_audit_then_continues_to_next_chapter():
+def test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch():
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
         write_json(project / "故事结构_增量.json", empty_story())
@@ -131,49 +113,35 @@ def test_run_retries_periodic_audit_then_continues_to_next_chapter():
         write_chapter_source(project, 6)
         (project / "章节处理" / "第006章_测试.md").write_text("# 第006章分析\n", encoding="utf-8")
         write_json(project / "章节处理" / "第006章_测试.json", empty_delta(6))
-        command, attempts = write_auto_auditor(project)
-
-        rc = cmd_run(project, audit_command=command, governance_retries=2)
-        assert rc == 0
-        assert attempts.read_text(encoding="utf-8") == "2"
+        rc = cmd_run(project)
+        assert rc == 2
         status = project / "质量治理" / "周期审计" / "audit_001-005.status.json"
+        assert load_status(status)["status"] == "awaiting_agent"
+        assert not (project / "故事结构版本" / "story_after_ch006.json").is_file()
+
+        correction = project / "质量治理" / "周期审计" / "correction_001-005.json"
+        empty = {key: [] for key in ["角色集", "事件集", "地点集", "线索集", "阵营集", "物品集"]}
+        write_json(correction, {
+            "章节范围": "第001章-第005章",
+            "治理类型": "no_change",
+            "质量说明": "已检查角色、事件、地点、线索、阵营、物品，无需合并或降级。",
+            "证据范围": ["第001章", "第002章", "第003章", "第004章", "第005章"],
+            "新增元素": empty,
+            "修改元素": empty,
+        })
+
+        rc = cmd_run(project)
+        assert rc == 0
         assert load_status(status)["status"] == "committed"
         assert list((project / "质量治理" / "周期审计").glob("validate_*governance_*.txt"))
         assert not list((project / "质量治理" / "按需治理").glob("*governance_*.txt"))
         assert (project / "故事结构版本" / "story_after_ch006.json").is_file()
 
-    print("[OK] run 自动重试周期审计、提交治理补丁并继续下一章")
+    print("[OK] run 将周期审计交给Agent，提交真实补丁后继续下一章")
 
 
 def load_status(path):
     return json.loads(path.read_text(encoding="utf-8"))
-
-
-def test_run_recovers_legacy_pending_audit_without_manual_pause():
-    with tempfile.TemporaryDirectory() as td:
-        project = Path(td) / "拆书_测试"
-        write_json(project / "故事结构_增量.json", empty_story())
-        for seq in range(1, 6):
-            write_completed_chapter(project, seq)
-        write_chapter_source(project, 6)
-        (project / "章节处理" / "第006章_测试.md").write_text("# 第006章分析\n", encoding="utf-8")
-        write_json(project / "章节处理" / "第006章_测试.json", empty_delta(6))
-        status = project / "质量治理" / "周期审计" / "audit_001-005.status.json"
-        write_json(status, {
-            "status": "pending",
-            "range": "001-005",
-            "audit_pack": str(project / "质量治理" / "周期审计" / "audit_001-005.md"),
-            "correction_path": str(project / "质量治理" / "周期审计" / "correction_001-005.json"),
-        })
-        command, attempts = write_auto_auditor(project)
-
-        rc = cmd_run(project, audit_command=command, governance_retries=2)
-        assert rc == 0
-        assert attempts.read_text(encoding="utf-8") == "2"
-        assert load_status(status)["status"] == "committed"
-        assert (project / "故事结构版本" / "story_after_ch006.json").is_file()
-
-    print("[OK] run 自动接管旧版 pending 周期审计")
 
 
 def test_manual_governance_reports_remain_separate():
@@ -181,7 +149,14 @@ def test_manual_governance_reports_remain_separate():
         project = Path(td) / "拆书_测试"
         write_json(project / "故事结构_增量.json", empty_story())
         patch = project / "manual_correction.json"
-        write_json(patch, {"章节": "手工治理", "新增元素": empty_delta(1)["新增元素"], "修改元素": empty_delta(1)["修改元素"]})
+        write_json(patch, {
+            "章节": "手工治理",
+            "治理类型": "no_change",
+            "质量说明": "手工治理回归检查，无需修改。",
+            "证据范围": ["第001章"],
+            "新增元素": empty_delta(1)["新增元素"],
+            "修改元素": empty_delta(1)["修改元素"],
+        })
 
         rc = commit_governance(project, str(patch))
         assert rc == 0
@@ -191,53 +166,8 @@ def test_manual_governance_reports_remain_separate():
     print("[OK] 手工治理报告保持在按需治理目录")
 
 
-def test_audit_worker_timeout_is_reported():
-    with tempfile.TemporaryDirectory() as td:
-        project = Path(td) / "拆书_测试"
-        paths = {
-            "dir": project / "质量治理" / "周期审计",
-            "pack": project / "质量治理" / "周期审计" / "audit_001-001.md",
-            "correction": project / "质量治理" / "周期审计" / "correction_001-001.json",
-            "feedback": project / "质量治理" / "周期审计" / "feedback_001-001.md",
-        }
-        paths["dir"].mkdir(parents=True)
-        rc, report = run_audit_worker(
-            f'"{sys.executable}" -c "import time; time.sleep(2)"', project, paths, 1, 1, 1, 0.1
-        )
-        assert rc == 124
-        assert "超时" in report.read_text(encoding="utf-8")
-
-    print("[OK] 外部审计器超时会记录并失败关闭")
-
-
-def test_governance_retries_means_retries_after_initial_attempt():
-    with tempfile.TemporaryDirectory() as td:
-        project = Path(td) / "拆书_测试"
-        write_json(project / "故事结构_增量.json", empty_story())
-        rc = run_periodic_governance(
-            project,
-            1,
-            1,
-            f'"{sys.executable}" -c "raise SystemExit(1)"',
-            governance_retries=3,
-            retry_delay=0,
-            audit_timeout_seconds=600,
-        )
-        assert rc == 1
-        reports = list((project / "质量治理" / "周期审计").glob("*.worker_*.txt"))
-        assert len(reports) == 4
-        status = load_status(project / "质量治理" / "周期审计" / "audit_001-001.status.json")
-        assert status["status"] == "failed"
-        assert status["attempt"] == 4
-
-    print("[OK] 3 次重试限制为首次执行外加 3 次重试")
-
-
 if __name__ == "__main__":
     test_audit_pack_cli_creates_review_package()
-    test_run_retries_periodic_audit_then_continues_to_next_chapter()
-    test_run_recovers_legacy_pending_audit_without_manual_pause()
+    test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch()
     test_manual_governance_reports_remain_separate()
-    test_audit_worker_timeout_is_reported()
-    test_governance_retries_means_retries_after_initial_attempt()
     print("\n全部测试通过 [PASS]")

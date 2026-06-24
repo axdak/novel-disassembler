@@ -132,23 +132,25 @@ python validate_structure.py --chapter-check <故事结构_增量.json> <第N章
 
 审计器输出 `correction_delta.json`，不得直接覆盖完整JSON。
 
-自动运行时，周期审计不构成人工暂停点。`run_pipeline.py run` 在每个周期点执行：
+持续拆书时，周期审计由主控Agent接力完成。`run_pipeline.py run` 在每个周期点执行：
 
 ```text
 生成/更新 audit_001-005.md
 ↓
-调用配置的自动审计器生成 correction_001-005.json
+返回 `2`，交接给主控Agent读取任务包并生成真实 correction_001-005.json
 ↓
-validate_delta --mode governance → merge_delta → apply_governance_ops → validate_structure --mode governance
+再次运行 run 后，validate_delta --mode governance → merge_delta → apply_governance_ops → validate_structure --mode governance
 ↓
-失败则把审计器输出和校验反馈写入 audit_001-005.feedback.md，再自动重试
+失败则读取校验报告并重写补丁，再次运行 run
 ↓
 通过后才进入下一章
 ```
 
-自动审计器通过 `--audit-command` 或 `NOVEL_AUDIT_COMMAND` 配置。命令模板可使用 `{project_dir}`、`{audit_pack}`、`{correction_path}`、`{feedback_path}`、`{chapter_start}`、`{chapter_end}`、`{attempt}`。`--governance-retries` 表示首次失败后的最大重试次数，默认 `3`（最多共尝试4次），`0` 表示不重试；单次审计器默认900秒超时，可通过 `--audit-timeout-seconds` 在600-1800秒间调整。审计器没有配置、超时或重试耗尽时，主控会失败关闭，不会把未治理的结构带入下一章。
+返回 `2` 是正常的待办交接，不是失败。主控Agent必须自行完成审计并写出真实补丁；禁止空 Delta、伪造 worker 或跳过审计。补丁校验失败时，主控Agent读取生成的校验报告并修复补丁，直到通过或遇到源文件、权限、必要工具等硬阻塞。
 
 周期补丁可以用顶层 `章节范围` 表示审计范围；该字段只在 `validate_delta.py --mode governance` 中有效。逐章 Delta 仍必须使用单章 `章节` 字段。
+
+若周期内确实无需治理，必须显式声明 no_change：补丁顶层带 `治理类型: "no_change"` + 非空 `质量说明` + 非空 `证据范围`（已审计章节数组）；`新增元素 / 修改元素 / 治理操作` 全空但缺这三项元数据的补丁会被 `validate_delta.py --mode governance` 直接拦截。详见 `governance.md`。
 
 最终阶段允许模型生成完整 `故事结构_草稿.json`，但必须经过：
 

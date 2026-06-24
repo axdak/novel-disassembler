@@ -55,3 +55,11 @@
 - `标签集` 用于跨事件筛选、聚合和导航。
 - 视觉细节放在 `详情` 和 `全书分析/视觉资产`，不新增顶层 `图片集`。
 - 所有视觉资产必须有原文或章节分析证据，不得为好看编造。
+
+## v12.1 标签自动压缩
+
+- 新增 `scripts/compress_tags.py`：在 Delta 入库前和 merge 后两个时点，机械地把所有带受控前缀（`X:Y` 形态，X 出现在 `narrative_taxonomy.json` 顶层键中）的标签从 `标签集` 下层到 `详情.补充标签`，同时按 `references/tag_limits.json` 对剩余自由标签做 FIFO 截断，超出部分也下层。
+- 新增 `references/tag_limits.json`：每集合标签上限配置（事件集 12，其它 8）。
+- `scripts/run_pipeline.py` 的 `run`/`replay` 流程：在 `validate_delta` 前加 `compress_tags --delta`，在 `validate_structure` 前加 `compress_tags --structure`；报告分别写入 `质量治理/delta校验/compress_ch{seq:03d}.json` 和 `质量治理/规范化/compress_after_ch{seq:03d}.json`。
+- 设计目的：让「未知受控标签 / 越权前缀」一类报错由确定性脚本而非 LLM 解决，避免 repair 循环里 LLM 用「整删前缀」的捷径过校验导致语义丢失。
+- 已知影响：`画面类型:`、`视觉用途:` 这两个视觉资产入口前缀也会被下层；后续若启用视觉资产工作流，相关查询要同时读 `标签集` 和 `详情.补充标签`。

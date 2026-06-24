@@ -30,6 +30,31 @@ python scripts/run_pipeline.py analysis-pack <项目目录> --task style --chapt
 python scripts/run_pipeline.py analysis-pack <项目目录> --task visual_assets --chapters all --include-original sample
 ```
 
+按章独立生成视觉资产（v12 新增；产物写入 `全书分析/视觉资产/分章/chNNN/`，不动顶层）：
+
+```bash
+# 指定单章
+python scripts/run_pipeline.py analysis-pack <项目目录> --task visual_assets --chapters 12 --per-chapter
+
+# 指定章节范围
+python scripts/run_pipeline.py analysis-pack <项目目录> --task visual_assets --chapters 12-15 --per-chapter
+```
+
+从分章产物 reduce 出顶层五件套（手动 aggregate）：
+
+```bash
+python scripts/run_pipeline.py analysis-pack <项目目录> --task visual_assets --aggregate
+```
+
+自动按章顺序推进（推荐；和 run_pipeline.py run 一样的返回 2 自主循环模式）：
+
+```bash
+python scripts/run_pipeline.py visual-assets-auto <项目目录>
+# 每次返回 2 交接一章；主控Agent按 reduce_prompt 写完 分章/chNNN/ 五件套后再次运行
+# 所有 eligible 章节完成后自动切到 aggregate，再返回 2 交接顶层汇总写入
+# 顶层汇总写完后返回 0 表示流程完成
+```
+
 生成世界观提取任务包：
 
 ```bash

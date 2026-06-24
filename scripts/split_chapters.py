@@ -49,8 +49,9 @@ def read_file(path:str)->str:
             pass
     raise ValueError(f'无法解码文件: {path}')
 
-def detect_pattern(text:str, sample_lines:int=500, min_matches:int=2)->Tuple[Optional[str],List[str]]:
-    lines=text.splitlines()[:sample_lines]
+def detect_pattern(text:str, sample_lines:int=0, min_matches:int=2)->Tuple[Optional[str],List[str]]:
+    # sample_lines<=0 表示扫全文；保留参数仅为向后兼容。
+    lines=text.splitlines() if sample_lines<=0 else text.splitlines()[:sample_lines]
     for pat in CHAPTER_PATTERNS:
         matches=[line.strip() for line in lines if line.strip() and re.match(pat,line.strip())]
         if len(matches)>=min_matches: return pat,matches
@@ -78,7 +79,7 @@ def write_index(out_dir:Path,index:List[dict],source_file:str,pattern:str,prefac
     (out_dir/'_索引.json').write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
     print(f"章节索引已写入: {out_dir/'_索引.json'}")
 
-def split_novel(input_file:str, output_dir:str, pattern:str='', preface_mode:str='separate', sample_lines:int=500, min_matches:int=2):
+def split_novel(input_file:str, output_dir:str, pattern:str='', preface_mode:str='separate', sample_lines:int=0, min_matches:int=2):
     out=Path(output_dir); out.mkdir(parents=True,exist_ok=True)
     content=read_file(input_file)
     pat=pattern or detect_pattern(content,sample_lines,min_matches)[0]
@@ -130,7 +131,7 @@ def main():
     ap.add_argument('input_file'); ap.add_argument('output_dir')
     ap.add_argument('--pattern',default='')
     ap.add_argument('--preface-mode',choices=['separate','attach','chapter','drop'],default='separate')
-    ap.add_argument('--sample-lines',type=int,default=500)
+    ap.add_argument('--sample-lines',type=int,default=0,help='0=扫全文（默认）；>0=只看前N行')
     ap.add_argument('--min-matches',type=int,default=2)
     args=ap.parse_args()
     split_novel(args.input_file,args.output_dir,args.pattern,args.preface_mode,args.sample_lines,args.min_matches)

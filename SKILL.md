@@ -15,6 +15,9 @@ agent_created: true
 3. 模型只输出 Delta，不重写完整故事结构。
 4. 合并、校验、断点、回滚由脚本负责。
 5. 遇到具体任务时，按下表加载对应文档。
+6. 用户要求持续拆书时，主控Agent必须自主循环：`run_pipeline.py run` 返回 `2` 表示有待办任务包，不是失败；立即完成任务包指定产物并再次运行，不在章节、修复或周期审计之间等待用户指令。
+7. 周期审计必须由主控Agent读取任务包后产出真实 `correction_XXX.json`；不得通过空 Delta、伪造 worker 或跳过审计来解除待办。
+8. 单章必须分两次独立模型分析：`task_chNNN_analysis.md` 只产出章节分析MD；重新运行后生成的 `task_chNNN_delta.md` 才读取该MD并只产出Delta JSON。不得在分析任务中写Delta，也不得在Delta任务中重写分析MD。
 
 ## 按需加载表 (Router)
 
@@ -22,12 +25,17 @@ agent_created: true
 
 | 任务阶段 | 需要读取的参考文件 / 模板 / Schema |
 | :--- | :--- |
-| **初始化与流程了解** | 读取 `references/process_overview.md` 了解全局流程。 |
+| **了解全局流程** | 读取 `references/process_overview.md`。 |
+| **初始化项目 / 步骤1 拆章 / 每章硬产物** | 读取 `references/file_structure.md`。 |
+| **持续自主执行 / 进度汇报** | 读取 `references/autonomous_loop.md` 与 `prompts/autonomous_run.j2`。 |
+| **`run_pipeline.py` 命令、步骤3/4 命令、资源清单** | 读取 `references/commands_and_resources.md`。 |
+| **断点续传 / 恢复** | 读取 `references/checkpoint_mechanism.md`。 |
 | **执行章节分析** | 读取 `references/chapter_analysis.md` (规则) 和 `prompts/chapter_analysis.j2` (模板)。 |
-| **提取本章 Delta** | 读取 `references/delta_extraction.md` (规则), `prompts/delta_extract.j2` (模板) 以及 `schemas/delta.schema.json`。 |
-| **周期性结构审计** | 读取 `references/governance.md` (规则), `prompts/audit.j2` (模板) 以及 `schemas/audit_correction.schema.json`。 |
+| **提取本章 Delta** | 读取 `references/delta_extraction.md` (规则), `prompts/delta_extract.j2` (模板) 以及 `schemas/delta.schema.json`（仅作轻量格式提示；强校验见 `scripts/validate_delta.py` + `scripts/story_schema_rules.py`）。 |
+| **周期性结构审计** | 读取 `references/governance.md` (规则), `prompts/audit.j2` (模板) 以及 `schemas/audit_correction.schema.json`（同上，仅作格式提示；强校验见 `scripts/validate_delta.py`）。 |
 | **整理最终交付物** | 读取 `references/finalization.md` (规则) 和 `prompts/final_draft.j2` (模板)。 |
 | **查阅全局结构规范** | 读取 `references/story_structure_spec.md`。 |
 | **查阅故事质量治理** | 读取 `references/story_structure_quality_governance.md`。 |
 | **提取视觉资产/分镜** | 读取 `references/visual_asset_spec.md`。 |
+| **按章生成视觉资产 / 视觉资产自主循环** | 读取 `references/visual_asset_spec.md` 的「分章独立产物」段，以及 `references/analysis_workbench_commands.md` 中的 `--per-chapter` / `visual-assets-auto` 命令。 |
 | **进行全书综合分析** | 读取 `references/fullbook_analysis_workbench.md` 或 `references/analysis_four_dimensions.md`，执行命令参考 `references/analysis_workbench_commands.md`。 |

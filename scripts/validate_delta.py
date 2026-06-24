@@ -373,6 +373,42 @@ def validate_tag_governance_ops(current: Dict[str, Any], delta: Dict[str, Any], 
     return errors
 
 
+def _is_empty_governance_workload(delta: Dict[str, Any]) -> bool:
+    """治理Delta是否完全没有作业：无新增/修改元素，且无任何非空治理操作。"""
+    for section in ("新增元素", "修改元素"):
+        bucket = delta.get(section, {})
+        if isinstance(bucket, dict):
+            for value in bucket.values():
+                if isinstance(value, list) and value:
+                    return False
+    ops = delta.get("治理操作", {})
+    if isinstance(ops, dict):
+        for value in ops.values():
+            if isinstance(value, list) and value:
+                return False
+    return True
+
+
+def validate_no_change_metadata(delta: Dict[str, Any]) -> List[str]:
+    """治理Delta若整体为空，必须显式声明[治理类型=no_change]并附质量说明、证据范围。"""
+    errors: List[str] = []
+    if not _is_empty_governance_workload(delta):
+        return errors
+    if delta.get("治理类型") != "no_change":
+        errors.append("治理Delta无任何新增/修改元素和治理操作时，必须显式声明[治理类型=no_change]；禁止提交空补丁跳过审计")
+    note = delta.get("质量说明")
+    if not isinstance(note, str) or not note.strip():
+        errors.append("空治理补丁(治理类型=no_change)必须提供非空[质量说明]，记录已检查范围与无需修改的理由")
+    evidence = delta.get("证据范围")
+    if not isinstance(evidence, list) or not evidence:
+        errors.append("空治理补丁(治理类型=no_change)必须提供非空数组[证据范围]，列举已审计章节")
+    elif any(not isinstance(x, str) or not x.strip() for x in evidence):
+        errors.append("空治理补丁[证据范围]每项必须是非空字符串")
+    elif len({x.strip() for x in evidence}) != len(evidence):
+        errors.append("空治理补丁[证据范围]不得包含重复项")
+    return errors
+
+
 def write_json_report(path: str, passed: bool, mode: str, errors: List[str], warnings: List[str]) -> None:
     """Write the stable, machine-readable companion to the console report."""
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
@@ -412,6 +448,8 @@ def validate_delta(current_path: str, delta_path: str, mode: str = "process", st
         errors.extend(e2)
         warnings.extend(w2)
         errors.extend(validate_tag_governance_ops(current if isinstance(current, dict) else {}, delta, mode))
+        if mode == "governance":
+            errors.extend(validate_no_change_metadata(delta))
     if strict and warnings:
         errors.extend(warnings)
         warnings = []

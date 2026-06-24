@@ -1,5 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "轻量格式提示，仅用于任务包内引导 Agent 输出顶层结构。集合内详情字段、引用、章节/时间、控制标签等强校验以 scripts/validate_delta.py（规则源 scripts/story_schema_rules.py）为准。",
   "type": "object",
   "properties": {
     "章节范围": { "type": "string" },

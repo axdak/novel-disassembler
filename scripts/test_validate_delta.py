@@ -87,13 +87,29 @@ def governance_range_delta():
     empty = {k: [] for k in ["角色集", "事件集", "地点集", "线索集", "阵营集", "物品集"]}
     return {
         "章节范围": "第001章-第005章",
+        "治理类型": "no_change",
+        "质量说明": "已检查角色、事件、地点、线索、阵营、物品，无需合并或降级。",
+        "证据范围": ["第001章", "第002章", "第003章", "第004章", "第005章"],
+        "新增元素": empty,
+        "修改元素": empty,
+    }
+
+
+def empty_governance_delta_without_metadata():
+    """旧式空补丁：用以确认空补丁不再能跳过审计。"""
+    empty = {k: [] for k in ["角色集", "事件集", "地点集", "线索集", "阵营集", "物品集"]}
+    return {
+        "章节范围": "第001章-第005章",
         "新增元素": empty,
         "修改元素": empty,
     }
 
 
 def run(cmd):
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, encoding="utf-8", errors="replace", env=env)
 
 
 def test_good_delta_passes():
@@ -198,6 +214,33 @@ def test_governance_range_delta_passes_only_in_governance_mode():
         process = run([sys.executable, str(VALIDATOR), "--mode", "process", str(story), str(delta)])
         assert governance.returncode == 0, governance.stdout
         assert process.returncode != 0, process.stdout
+
+
+def test_empty_governance_delta_without_no_change_metadata_fails():
+    with tempfile.TemporaryDirectory() as td:
+        story = Path(td) / "story.json"
+        delta = Path(td) / "correction_001-005.json"
+        write_json(story, base_story())
+        write_json(delta, empty_governance_delta_without_metadata())
+        result = run([sys.executable, str(VALIDATOR), "--mode", "governance", str(story), str(delta)])
+        assert result.returncode != 0, result.stdout
+        assert "治理类型=no_change" in result.stdout, result.stdout
+        assert "质量说明" in result.stdout, result.stdout
+        assert "证据范围" in result.stdout, result.stdout
+
+
+def test_no_change_metadata_only_required_when_governance_workload_empty():
+    """非空治理补丁不应被新规则误伤：仅靠新增元素也能通过 governance 校验。"""
+    with tempfile.TemporaryDirectory() as td:
+        story = Path(td) / "story.json"
+        delta = Path(td) / "correction_001-005.json"
+        write_json(story, base_story())
+        patch = good_delta()
+        patch.pop("章节")
+        patch["章节范围"] = "第001章-第005章"
+        write_json(delta, patch)
+        result = run([sys.executable, str(VALIDATOR), "--mode", "governance", str(story), str(delta)])
+        assert result.returncode == 0, result.stdout
 
 
 def test_chapter_check_after_merge_passes():
