@@ -172,3 +172,18 @@ def test_chapter_structure_per_chapter_outputs_path():
 def test_chapter_structure_per_chapter_outputs_zero_padding():
     outs = chapter_structure_per_chapter_outputs(123)
     assert outs == ["全书分析/故事结构/分章/ch123/章节结构.md"]
+
+
+from analysis_context_pack import reduce_contract_chapter_structure_per_chapter
+
+
+def test_reduce_contract_chapter_structure_mentions_target_file():
+    text = reduce_contract_chapter_structure_per_chapter(42)
+    assert "全书分析/故事结构/分章/ch042/章节结构.md" in text
+    # 五小节顺序必须出现
+    for header in ["三幕式定位", "故事七要素", "故事力学", "故事工程学", "小说骨架"]:
+        assert header in text
+    # 禁止跨章归纳的硬规则
+    assert "禁止跨章" in text
+    # 强制五小节齐全的硬规则
+    assert "本章无推进" in text or "本章无对应内容" in text
