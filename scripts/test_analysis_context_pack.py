@@ -104,3 +104,58 @@ def test_summary_does_not_decorate_non_event_collections():
     summary = summarize_story_structure(story)
     assert "主角(主角团)" in summary
     assert "主角(主角团)[" not in summary
+
+
+from analysis_context_pack import TASKS, output_contract
+
+
+def test_chapter_structure_task_registered():
+    assert "chapter_structure" in TASKS
+    info = TASKS["chapter_structure"]
+    assert info["name"]  # 非空
+    assert info["goal"]
+    # 章节级 output 路径用 {NNN} 占位,实际章节号由 per-chapter 派发时替换
+    assert any("分章" in p and "章节结构.md" in p for p in info["outputs"])
+
+
+def test_narrative_structure_task_registered():
+    assert "narrative_structure" in TASKS
+    info = TASKS["narrative_structure"]
+    expected = {
+        "全书分析/故事结构/三幕式结构图.md",
+        "全书分析/故事结构/Brooks四部分结构图.md",
+        "全书分析/故事结构/Freytag五段结构图.md",
+        "全书分析/故事结构/故事七要素档案.md",
+        "全书分析/故事结构/故事力学评估.md",
+        "全书分析/故事结构/故事工程学评估.md",
+        "全书分析/故事结构/小说骨架.md",
+    }
+    assert expected.issubset(set(info["outputs"]))
+
+
+def test_chapter_structure_output_contract_has_five_sections():
+    contract = output_contract("chapter_structure")
+    # 五小节标题必须全部出现
+    for header in ["三幕式定位", "故事七要素", "故事力学", "故事工程学", "小说骨架"]:
+        assert header in contract
+    # 三幕式术语锁定
+    assert "第一幕" in contract and "建置" in contract
+    assert "第二幕" in contract and "对抗" in contract
+    assert "第三幕" in contract and "解决" in contract
+    # 禁止编造的硬规则
+    assert "待确认" in contract
+
+
+def test_narrative_structure_output_contract_has_seven_artifacts():
+    contract = output_contract("narrative_structure")
+    for artifact in [
+        "三幕式结构图", "Brooks四部分结构图", "Freytag五段结构图",
+        "故事七要素档案", "故事力学评估", "故事工程学评估", "小说骨架",
+    ]:
+        assert artifact in contract
+    # 七要素清单出现
+    for elem in [
+        "主角", "缺陷", "有利的故事环境", "反面角色",
+        "主角的盟友", "改变人生的事件", "整合故事要素",
+    ]:
+        assert elem in contract
