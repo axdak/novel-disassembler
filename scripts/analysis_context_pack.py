@@ -143,6 +143,11 @@ def visual_assets_per_chapter_outputs(seq: int) -> List[str]:
     return [f"{base}/{name}" for name in VISUAL_ASSETS_PER_CHAPTER_FILES]
 
 
+def chapter_structure_per_chapter_outputs(seq: int) -> List[str]:
+    """单章故事结构产物的相对路径，与视觉资产分章对齐。"""
+    return [f"全书分析/故事结构/分章/ch{seq:03d}/章节结构.md"]
+
+
 def read_text(path: Path, max_chars: Optional[int] = None) -> str:
     if not path.is_file():
         return ""
@@ -655,15 +660,20 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
     task_info = TASKS[task]
     lines: List[str] = []
     if per_chapter_seq is not None:
-        lines.append(f"# 视觉资产分章任务包：第{per_chapter_seq:03d}章 ({pack_no}/{total_packs})")
+        per_chapter_label = {
+            "visual_assets": "视觉资产分章任务包",
+            "chapter_structure": "章节结构分章任务包",
+        }.get(task, f"{task_info['name']} 分章任务包")
+        lines.append(f"# {per_chapter_label}：第{per_chapter_seq:03d}章 ({pack_no}/{total_packs})")
     else:
         lines.append(f"# 全书/局部分析任务包：{task_info['name']} ({pack_no}/{total_packs})")
     lines.append("")
     lines.append("## 任务定位")
     lines.append(task_info["goal"])
     if per_chapter_seq is not None:
+        scope = "视觉资产" if task == "visual_assets" else "章节结构.md"
         lines.append("")
-        lines.append("⚠️ 本任务包只针对**单章**生成视觉资产。所有产物只能引用本章原文与本章分析MD的内容，禁止跨章总结。")
+        lines.append(f"⚠️ 本任务包只针对**单章**生成{scope}。所有产物只能引用本章原文与本章分析MD的内容，禁止跨章总结。")
     if question:
         lines.append("")
         lines.append("## 用户指定问题")
@@ -681,7 +691,12 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
 
     lines.append("## 目标输出文件")
     if per_chapter_seq is not None:
-        for out in visual_assets_per_chapter_outputs(per_chapter_seq):
+        per_chapter_outputs = {
+            "visual_assets": visual_assets_per_chapter_outputs,
+            "chapter_structure": chapter_structure_per_chapter_outputs,
+        }.get(task)
+        out_list = per_chapter_outputs(per_chapter_seq) if per_chapter_outputs else []
+        for out in out_list:
             lines.append(f"- {out}")
     else:
         outputs = task_info.get("outputs") or []
@@ -738,8 +753,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"错误: 项目目录不存在: {project_dir}")
         return 1
 
-    if (args.per_chapter or args.aggregate) and args.task != "visual_assets":
-        print("错误: --per-chapter / --aggregate 仅支持 --task visual_assets")
+    if args.per_chapter and args.task not in {"visual_assets", "chapter_structure"}:
+        print("错误: --per-chapter 仅支持 --task visual_assets 或 chapter_structure")
+        return 1
+    if args.aggregate and args.task != "visual_assets":
+        print("错误: --aggregate 当前仅支持 --task visual_assets")
         return 1
     if args.per_chapter and args.aggregate:
         print("错误: --per-chapter 和 --aggregate 不能同时使用")
@@ -761,6 +779,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
 
     if args.per_chapter:
+        if args.task == "chapter_structure":
+            return _build_chapter_structure_per_chapter_packs(project_dir, args, chapters)
         return _build_visual_per_chapter_packs(project_dir, args, chapters)
 
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -885,6 +905,67 @@ def _build_visual_per_chapter_packs(project_dir: Path, args: argparse.Namespace,
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"视觉资产分章任务包已生成: {out_root}")
+    print(f"待处理章节数: {len(pack_records)}（已跳过已完成章节）")
+    print(f"清单: {manifest_path}")
+    for r in pack_records:
+        print(f"- {r['pack']}")
+    return 0
+
+
+def _build_chapter_structure_per_chapter_packs(project_dir: Path, args: argparse.Namespace, chapters: List[Dict[str, Any]]) -> int:
+    """为每个选定章节生成一份独立 chapter_structure 任务包。"""
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_root = Path(args.out_dir) if args.out_dir else project_dir / "全书分析" / "_任务包" / f"{timestamp}_chapter_structure_per_chapter"
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    pack_records: List[Dict[str, Any]] = []
+    for ch in chapters:
+        seq = int(ch["seq"])
+        existing = [project_dir / rel for rel in chapter_structure_per_chapter_outputs(seq)]
+        if all(p.is_file() and p.stat().st_size > 0 for p in existing):
+            print(f"跳过第{seq:03d}章：章节结构.md 已存在。")
+            continue
+        pack_content = build_pack(
+            project_dir,
+            "chapter_structure",
+            [ch],
+            args.targets,
+            args.question,
+            args.include_original,
+            args.max_original_chars,
+            args.max_analysis_chars,
+            1,
+            1,
+            per_chapter_seq=seq,
+        )
+        pack_path = out_root / f"pack_ch{seq:03d}.md"
+        pack_path.write_text(pack_content, encoding="utf-8")
+        reduce_path = out_root / f"reduce_prompt_ch{seq:03d}.md"
+        reduce_path.write_text(reduce_contract_chapter_structure_per_chapter(seq), encoding="utf-8")
+        pack_records.append({
+            "seq": seq,
+            "pack": str(pack_path.relative_to(project_dir)),
+            "reduce_prompt": str(reduce_path.relative_to(project_dir)),
+            "outputs": chapter_structure_per_chapter_outputs(seq),
+        })
+
+    manifest = {
+        "created_at": timestamp,
+        "task": "chapter_structure",
+        "mode": "per_chapter",
+        "chapter_range": args.chapters,
+        "include_original": args.include_original,
+        "pack_count": len(pack_records),
+        "packs": pack_records,
+        "recommended_workflow": [
+            "对每个 pack_chNNN.md：读取并按 reduce_prompt_chNNN.md 的契约直接写出 全书分析/故事结构/分章/chNNN/章节结构.md",
+            "完成所有章节后，可执行 `--task narrative_structure` 做全书级汇总",
+        ],
+    }
+    manifest_path = out_root / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print(f"故事结构分章任务包已生成: {out_root}")
     print(f"待处理章节数: {len(pack_records)}（已跳过已完成章节）")
     print(f"清单: {manifest_path}")
     for r in pack_records:

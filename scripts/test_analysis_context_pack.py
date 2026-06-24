@@ -159,3 +159,16 @@ def test_narrative_structure_output_contract_has_seven_artifacts():
         "主角的盟友", "改变人生的事件", "整合故事要素",
     ]:
         assert elem in contract
+
+
+from analysis_context_pack import chapter_structure_per_chapter_outputs
+
+
+def test_chapter_structure_per_chapter_outputs_path():
+    outs = chapter_structure_per_chapter_outputs(7)
+    assert outs == ["全书分析/故事结构/分章/ch007/章节结构.md"]
+
+
+def test_chapter_structure_per_chapter_outputs_zero_padding():
+    outs = chapter_structure_per_chapter_outputs(123)
+    assert outs == ["全书分析/故事结构/分章/ch123/章节结构.md"]
