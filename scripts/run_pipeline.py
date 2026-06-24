@@ -69,7 +69,7 @@ REQUIRED_DIRS = [
     "原文", "原文拆解", "章节处理", "章节处理/_任务包", "章节处理/_修复任务",
     "质量治理/delta校验", "质量治理/章节校验", "质量治理/规范化", "质量治理/周期审计", "质量治理/按需治理", "质量治理/最终审计",
     "故事结构版本", "结构变更日志",
-    "全书分析/_任务包", "全书分析/剧情结构", "全书分析/人物分析", "全书分析/风格分析", "全书分析/世界观", "全书分析/视觉资产", "全书分析/迭代版本", "全书分析/局部分析",
+    "全书分析/_任务包", "全书分析/剧情结构", "全书分析/人物分析", "全书分析/风格分析", "全书分析/世界观", "全书分析/视觉资产", "全书分析/故事结构", "全书分析/迭代版本", "全书分析/局部分析",
 ]
 ANALYSIS_OUTPUTS = {
     "summary": ["全书分析/剧情结构/章节梗概汇总.md"],
@@ -82,6 +82,15 @@ ANALYSIS_OUTPUTS = {
     "plotlines": ["全书分析/剧情结构/剧情线总表.md", "全书分析/剧情结构/剧情线交汇矩阵.md"],
     "outline": ["全书分析/剧情结构/全书大纲.md"],
     "detailed_outline": ["全书分析/剧情结构/章节细纲.md"],
+    "narrative_structure": [
+        "全书分析/故事结构/三幕式结构图.md",
+        "全书分析/故事结构/Brooks四部分结构图.md",
+        "全书分析/故事结构/Freytag五段结构图.md",
+        "全书分析/故事结构/故事七要素档案.md",
+        "全书分析/故事结构/故事力学评估.md",
+        "全书分析/故事结构/故事工程学评估.md",
+        "全书分析/故事结构/小说骨架.md",
+    ],
     "visual_assets": ["全书分析/视觉资产/视觉资产清单.md", "全书分析/视觉资产/关键场景分镜表.md", "全书分析/视觉资产/AI绘图提示词素材.md", "全书分析/视觉资产/角色外观一致性表.md", "全书分析/视觉资产/场景氛围表.md"],
 }
 MULTI_UNIT_ARTIFACT_RE = re.compile(r"^第\d+\s*(?:-|—|–|~|～|至|到)\s*\d+章_.*\.(?:md|json)$")
@@ -1066,6 +1075,13 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
         ("全书分析/剧情结构/冲突图谱.md", "冲突图谱"),
         ("全书分析/视觉资产/视觉资产清单.md", "视觉资产清单"),
         ("全书分析/视觉资产/关键场景分镜表.md", "关键场景分镜表"),
+        ("全书分析/故事结构/三幕式结构图.md", "三幕式结构图"),
+        ("全书分析/故事结构/Brooks四部分结构图.md", "Brooks四部分结构图"),
+        ("全书分析/故事结构/Freytag五段结构图.md", "Freytag五段结构图"),
+        ("全书分析/故事结构/故事七要素档案.md", "故事七要素档案"),
+        ("全书分析/故事结构/故事力学评估.md", "故事力学评估"),
+        ("全书分析/故事结构/故事工程学评估.md", "故事工程学评估"),
+        ("全书分析/故事结构/小说骨架.md", "小说骨架"),
     ]
     analysis_refs: List[Dict[str, Any]] = []
     for rel, title in analysis_specs:
@@ -1421,7 +1437,7 @@ def main() -> int:
 
     p_pack = sub.add_parser("analysis-pack", help="生成全书/局部分析任务包")
     p_pack.add_argument("project_dir")
-    p_pack.add_argument("--task", choices=["summary", "characters", "plot", "style", "visual_assets", "report", "custom", "worldview", "plotlines", "outline", "detailed_outline"], required=True)
+    p_pack.add_argument("--task", choices=["summary", "characters", "plot", "style", "visual_assets", "report", "custom", "worldview", "plotlines", "outline", "detailed_outline", "chapter_structure", "narrative_structure"], required=True)
     p_pack.add_argument("--chapters", default="all")
     p_pack.add_argument("--targets", nargs="*", default=[])
     p_pack.add_argument("--question", default="")
@@ -1430,7 +1446,7 @@ def main() -> int:
     p_pack.add_argument("--max-original-chars", type=int, default=6000)
     p_pack.add_argument("--max-analysis-chars", type=int, default=12000)
     p_pack.add_argument("--out-dir", default="")
-    p_pack.add_argument("--per-chapter", action="store_true", help="（仅 visual_assets）每章一份独立任务包，产物写入 全书分析/视觉资产/分章/chNNN/")
+    p_pack.add_argument("--per-chapter", action="store_true", help="每章一份独立任务包（visual_assets / chapter_structure），产物写入对应的 全书分析/<维度>/分章/chNNN/ 目录")
     p_pack.add_argument("--aggregate", action="store_true", help="（仅 visual_assets）生成顶层汇总任务包，从 分章/chNNN/ 合并顶层五件套")
 
     p_status = sub.add_parser("analysis-status", help="查看全书/局部分析状态")

@@ -43,7 +43,7 @@ python <skill_path>/scripts/run_pipeline.py commit-governance <项目目录> <�
 
 推荐顺序仍然是：
 ```text
-summary → characters → plot → worldview → settings → plotlines → outline → detailed_outline → visual_assets → report
+summary → characters → plot → worldview → settings → plotlines → outline → detailed_outline → visual_assets → chapter_structure → narrative_structure → report
 ```
 但这只是报告依赖顺序，不是限制分析能力只能在步骤3执行。
 

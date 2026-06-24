@@ -39,3 +39,4 @@ agent_created: true
 | **提取视觉资产/分镜** | 读取 `references/visual_asset_spec.md`。 |
 | **按章生成视觉资产 / 视觉资产自主循环** | 读取 `references/visual_asset_spec.md` 的「分章独立产物」段，以及 `references/analysis_workbench_commands.md` 中的 `--per-chapter` / `visual-assets-auto` 命令。 |
 | **进行全书综合分析** | 读取 `references/fullbook_analysis_workbench.md` 或 `references/analysis_four_dimensions.md`，执行命令参考 `references/analysis_workbench_commands.md`。 |
+| **执行故事结构维度（chapter_structure / narrative_structure）** | 读取 `references/analysis_narrative_structure.md`；执行命令参考 `references/analysis_workbench_commands.md` 的 chapter_structure / narrative_structure 段。 |

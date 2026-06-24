@@ -63,3 +63,31 @@
 - `scripts/run_pipeline.py` 的 `run`/`replay` 流程：在 `validate_delta` 前加 `compress_tags --delta`，在 `validate_structure` 前加 `compress_tags --structure`；报告分别写入 `质量治理/delta校验/compress_ch{seq:03d}.json` 和 `质量治理/规范化/compress_after_ch{seq:03d}.json`。
 - 设计目的：让「未知受控标签 / 越权前缀」一类报错由确定性脚本而非 LLM 解决，避免 repair 循环里 LLM 用「整删前缀」的捷径过校验导致语义丢失。
 - 已知影响：`画面类型:`、`视觉用途:` 这两个视觉资产入口前缀也会被下层；后续若启用视觉资产工作流，相关查询要同时读 `标签集` 和 `详情.补充标签`。
+
+## 故事结构维度（chapter_structure / narrative_structure）
+
+新增"故事结构"分析维度，与视觉资产维度并列，提供 章节级节拍打点 + 全书级三种节拍图 + 故事七要素 + Brooks 故事力学/工程学 + 小说骨架。
+
+- `scripts/analysis_context_pack.py`
+  - 注册两个新 task：`chapter_structure`（分章独立产物，每章 `章节结构.md`）和 `narrative_structure`（全书 7 份产物）。
+  - `--per-chapter` 兼容 `chapter_structure`；强制要求 `--per-chapter` 否则拒绝。
+  - `narrative_structure` 全书包自动拼接「全书背景资料」段，含分章 `章节结构.md` 与 `章节梗概汇总.md` / `全书大纲.md` / `剧情线总表.md`。
+
+- `scripts/run_pipeline.py`
+  - `analysis-pack --task` 支持新 task。
+  - `ANALYSIS_OUTPUTS` 加入 `narrative_structure` 7 份产物。
+  - `final_pack` 把 7 份故事结构产物纳入最终整理参考材料。
+  - `REQUIRED_DIRS` 加入 `全书分析/故事结构`。
+
+- `references/`
+  - 新增 `analysis_narrative_structure.md` 规范。
+  - `fullbook_analysis_workbench.md`、`analysis_four_dimensions.md`、`file_structure.md`、`analysis_workbench_commands.md`、`commands_and_resources.md` 同步更新。
+
+- 文件产物
+  - `全书分析/故事结构/分章/chNNN/章节结构.md`（每章 1 份）
+  - `全书分析/故事结构/三幕式结构图.md` 等 7 份全书级产物
+
+- 不变事项
+  - 不引入新 schema。
+  - 不写入 `故事结构_增量.json`，纯分析产物。
+  - 现有 `chapter_analysis.j2`、`visual_assets` 工作流保持不变。

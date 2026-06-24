@@ -148,6 +148,57 @@ def chapter_structure_per_chapter_outputs(seq: int) -> List[str]:
     return [f"全书分析/故事结构/分章/ch{seq:03d}/章节结构.md"]
 
 
+NARRATIVE_STRUCTURE_BACKGROUND_SPECS = [
+    ("全书分析/剧情结构/章节梗概汇总.md", "章节梗概汇总"),
+    ("全书分析/剧情结构/全书大纲.md", "全书大纲"),
+    ("全书分析/剧情结构/剧情线总表.md", "剧情线总表"),
+    ("全书分析/剧情结构/剧情线交汇矩阵.md", "剧情线交汇矩阵"),
+]
+
+
+def build_narrative_structure_background(project_dir: Path, chapters: List[Dict[str, Any]], max_chars: int = 12000) -> str:
+    """收集 narrative_structure 全书任务所需的上游材料。
+
+    优先级（与 `references/analysis_narrative_structure.md` 一致）：
+    分章 章节结构.md > 章节梗概汇总 > 全书大纲 > 剧情线总表 > 剧情线交汇矩阵
+
+    上游产物缺失时显式标注「未生成」，不静默吞掉。
+    """
+    lines: List[str] = ["## 全书背景资料", ""]
+
+    # 分章 章节结构.md
+    lines.append("### 分章 章节结构.md（chapter_structure 产物）")
+    found_any = False
+    for ch in chapters:
+        seq = int(ch["seq"])
+        rel = chapter_structure_per_chapter_outputs(seq)[0]
+        path = project_dir / rel
+        if path.is_file() and path.stat().st_size > 0:
+            found_any = True
+            lines.append(f"#### 第{seq:03d}章 章节结构.md")
+            lines.append("```markdown")
+            lines.append(read_text(path, max_chars))
+            lines.append("```")
+            lines.append("")
+    if not found_any:
+        lines.append("【未生成任何分章 章节结构.md；建议先运行 --task chapter_structure --per-chapter】")
+        lines.append("")
+
+    # 4 个全书级参考产物
+    for rel, title in NARRATIVE_STRUCTURE_BACKGROUND_SPECS:
+        path = project_dir / rel
+        lines.append(f"### {title}")
+        if path.is_file() and path.stat().st_size > 0:
+            lines.append("```markdown")
+            lines.append(read_text(path, max_chars))
+            lines.append("```")
+        else:
+            lines.append(f"【未生成 `{rel}`；narrative_structure 的对齐质量会受影响。】")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def read_text(path: Path, max_chars: Optional[int] = None) -> str:
     if not path.is_file():
         return ""
@@ -776,6 +827,9 @@ def build_pack(project_dir: Path, task: str, chapters: List[Dict[str, Any]], tar
 
     lines.append(output_contract(task))
     lines.append("")
+    if task == "narrative_structure" and per_chapter_seq is None:
+        lines.append(build_narrative_structure_background(project_dir, chapters))
+        lines.append("")
     lines.append("## 章节材料")
     for ch in chapters:
         lines.append(build_chapter_block(project_dir, ch, task, include_original, max_original_chars, max_analysis_chars))

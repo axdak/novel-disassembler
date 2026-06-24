@@ -302,3 +302,18 @@ python scripts/analysis_context_pack.py <项目目录> \
 3. 所有结论都能回指章节号或 `事件:名称` / `角色:名称`；空缺写"待确认"。
 4. 不修改 `故事结构_增量.json` 或 `故事结构.json`。
 5. 现有 `chapter_analysis.j2` 输出格式不变，旧项目可继续使用。
+
+## 后记：实施偏差（2026-06-24）
+
+§ 八「文件改动清单」原列：
+
+- `prompts/chapter_structure.j2`、`prompts/narrative_structure.j2`（任务包模板）
+
+实际实施：两份任务包契约直接写在 `scripts/analysis_context_pack.py` 的 `output_contract()` 和 `reduce_contract_chapter_structure_per_chapter()` 中，与现有 `visual_assets` / `outline` 等任务保持一致（这些任务的契约同样是 inline 字符串，不是 .j2 文件）。简化原则：项目惯例统一。
+
+实际实施补充未列入原 § 八 的改动：
+
+- `scripts/run_pipeline.py`：`analysis-pack --task` 增加两个 choice；`ANALYSIS_OUTPUTS` 增加 `narrative_structure` 7 份产物；`final_pack` 的 `analysis_specs` 接入这 7 份产物；`REQUIRED_DIRS` 加入 `全书分析/故事结构`。
+- `references/analysis_workbench_commands.md`：增加新 task 命令示例。
+- `references/commands_and_resources.md`：更新推荐执行顺序链。
+- `references/v12_patch_notes.md`：新增 changelog 段。

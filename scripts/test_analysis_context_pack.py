@@ -239,3 +239,49 @@ def test_chapter_structure_without_per_chapter_is_rejected(tmp_path, capsys):
     assert rc == 1
     captured = capsys.readouterr()
     assert "--per-chapter" in captured.out
+
+
+def test_narrative_structure_pack_includes_background_section(tmp_path):
+    """narrative_structure 全书包必须包含「全书背景资料」段落，列出已有/缺失的上游产物。"""
+    from analysis_context_pack import build_pack
+    project = tmp_path / "novel"
+    (project / "原文拆解").mkdir(parents=True)
+    (project / "章节处理").mkdir(parents=True)
+    (project / "全书分析/剧情结构").mkdir(parents=True)
+    (project / "全书分析/故事结构/分章/ch001").mkdir(parents=True)
+
+    # 一份分章 章节结构.md
+    (project / "全书分析/故事结构/分章/ch001/章节结构.md").write_text(
+        "# 第001章 故事结构定位\n\n## 1. 三幕式定位\n第一幕（建置）。\n",
+        encoding="utf-8",
+    )
+    # 一份章节梗概汇总
+    (project / "全书分析/剧情结构/章节梗概汇总.md").write_text(
+        "| 章节 | 梗概 |\n| 001 | 序章 |\n", encoding="utf-8"
+    )
+    # 模拟章节材料
+    (project / "原文拆解/第001章_序章.md").write_text("# 序章\n原文", encoding="utf-8")
+    (project / "章节处理/第001章_序章.md").write_text("# 序章\n分析", encoding="utf-8")
+
+    chapters = [{"seq": 1, "filename": "第001章_序章.md", "title": "序章", "source_title": "序章"}]
+    pack = build_pack(project, "narrative_structure", chapters, [], "", "sample", 6000, 12000, 1, 1)
+
+    assert "## 全书背景资料" in pack
+    assert "第001章 章节结构.md" in pack
+    assert "章节梗概汇总" in pack
+    # 缺失的产物必须显式提示而不是静默
+    assert "未生成" in pack
+
+
+def test_narrative_structure_per_chapter_does_not_inject_background(tmp_path):
+    """per_chapter 模式不应该塞「全书背景资料」段落。"""
+    from analysis_context_pack import build_pack
+    project = tmp_path / "novel"
+    (project / "原文拆解").mkdir(parents=True)
+    (project / "章节处理").mkdir(parents=True)
+    (project / "原文拆解/第001章_序章.md").write_text("# 序章\n", encoding="utf-8")
+    (project / "章节处理/第001章_序章.md").write_text("# 序章\n", encoding="utf-8")
+
+    chapters = [{"seq": 1, "filename": "第001章_序章.md", "title": "序章", "source_title": "序章"}]
+    pack = build_pack(project, "narrative_structure", chapters, [], "", "sample", 6000, 12000, 1, 1, per_chapter_seq=1)
+    assert "## 全书背景资料" not in pack

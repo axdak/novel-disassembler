@@ -55,6 +55,31 @@ python scripts/run_pipeline.py visual-assets-auto <项目目录>
 # 顶层汇总写完后返回 0 表示流程完成
 ```
 
+### chapter_structure 分章生成
+
+每章独立产出 `章节结构.md`（必须配合 `--per-chapter`）：
+
+```bash
+# 单章
+python scripts/run_pipeline.py analysis-pack <项目目录> --task chapter_structure --chapters 12 --per-chapter
+
+# 章节范围
+python scripts/run_pipeline.py analysis-pack <项目目录> --task chapter_structure --chapters 1-50 --per-chapter
+
+# 全书
+python scripts/run_pipeline.py analysis-pack <项目目录> --task chapter_structure --chapters all --per-chapter
+```
+
+### narrative_structure 全书故事结构分析
+
+7 份产物（三幕式结构图 / Brooks四部分结构图 / Freytag五段结构图 / 故事七要素档案 / 故事力学评估 / 故事工程学评估 / 小说骨架）：
+
+```bash
+python scripts/run_pipeline.py analysis-pack <项目目录> --task narrative_structure --chapters all
+```
+
+任务包会自动拼接「全书背景资料」段；如尚未生成 `chapter_structure` 分章产物或 `章节梗概汇总.md` / `全书大纲.md` / `剧情线总表.md`，会显式标注「未生成」，不会静默缺失。
+
 生成世界观提取任务包：
 
 ```bash
