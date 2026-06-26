@@ -25,9 +25,10 @@ python {{ run_pipeline_path }} commit-governance {{ project_dir }} {{ correction
 - 周期治理阶段负责标签标准化：结合下方 `narrative_taxonomy.json`，把本周期内自由标签、`详情.补充标签`、介绍和详情中的稳定语义，尽量归并/补充为合适的受控前缀标签（例如 `人物类型:*`、`剧情线主题:*`、`爽点情绪点:*`、`画面类型:*` 等）。不确定时保留自由标签，不要硬套 taxonomy。
 - `治理标签` 每项必须给出 类型、名称、保留标签、降级标签、理由；保留与降级必须完整覆盖该元素当前标签集。降级项会自动写入可逆的 `详情.补充标签`。
 - 事件数组顺序代表章节逻辑顺序：治理新增的历史聚合事件必须按最小涉及章节插入；修改既有事件不得改变其时间、涉及章节或数组位置。
-- 事件分组推荐使用 `8位段号-40字以内复合剧情段短名`，例如 `00000010-退婚尊严线冲突爆发羞辱反击身份尊严`；短名需压缩包含剧情、剧情线主题、叙事功能、爽点/情绪点、冲突悬念类型，不使用 `+` 分隔长格式。治理后按事件数组顺序全量重排8位段号，并拆分非连续重复剧情段。
+- 事件分组推荐使用 `8位段号-40字以内复合剧情段短名`，例如 `00000010-退婚尊严线冲突爆发羞辱反击身份尊严`；短名需压缩包含剧情、剧情线主题、叙事功能、爽点/情绪点、冲突悬念类型，不使用 `+` 分隔长格式。分组只覆盖同一章节内的连续剧情段；治理后按事件数组顺序全量重排8位段号，不跨章节合并同名分组。
 - 顶层介绍治理：检查 `介绍.标题` 与 `介绍.描述`。当标题可由原文确认时补齐；当已经积累足够主线、主角和核心冲突信息而描述仍为空时，补一份阶段性故事简介。已有描述仅在明显失真时更新，禁止每轮追加过程笔记；最终阶段会统一重写为正式全书简介。
 - 只修正结构质量问题，不凭空补充原文没有的信息。
+- 本周期原文是事实依据。章节分析或 Delta 与原文冲突时，以原文为准；无法确认时保守保留，禁止据派生产物补造事实。
 
 {% if taxonomy_json -%}
 ## 受控叙事标签字典（用于周期标签标准化）
@@ -57,14 +58,14 @@ python {{ run_pipeline_path }} commit-governance {{ project_dir }} {{ correction
 {{ relevant_details }}
 ```
 {%- endif %}
-{%- if previous_correction %}
+{%- endif %}
+{% if previous_correction %}
 
 ## 上一个审计周期治理结果 ({{ previous_correction.name }})
 
 ```json
 {{ previous_correction.content }}
 ```
-{%- endif %}
 {%- endif %}
 {% for ch in chapters %}
 ## 第{{ "%03d" | format(ch.seq) }}章材料
@@ -76,16 +77,22 @@ python {{ run_pipeline_path }} commit-governance {{ project_dir }} {{ correction
 - 章节分析：`{{ ch.analysis_path }}`
 - Delta：`{{ ch.delta_path }}`
 
+### 本章原文
+
+```markdown
+{{ ch.chapter_text }}
+```
+
 ### 章节分析
 
 ```markdown
-{{ ch.analysis_excerpt }}
+{{ ch.analysis_text }}
 ```
 
 ### Delta
 
 ```json
-{{ ch.delta_excerpt }}
+{{ ch.delta_text }}
 ```
 {%- endif %}
 {% endfor %}

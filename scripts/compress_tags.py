@@ -108,7 +108,6 @@ def compress_item(item: Dict[str, Any], limit: int) -> Tuple[int, int]:
 
     prefix_tags = [t for t in cleaned if _is_prefixed(t)]
     free_tags = [t for t in cleaned if t not in prefix_tags]
-
     keep_free = free_tags[: max(limit, 0)]
     extra_free = free_tags[max(limit, 0):]
 

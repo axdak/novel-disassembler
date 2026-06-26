@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent / "scripts"
 RUNNER = ROOT / "run_pipeline.py"
 sys.path.insert(0, str(ROOT))
 
-from run_pipeline import cmd_run, commit_governance
+from run_pipeline import cmd_run, commit_governance, write_audit_pack
 
 
 def write_json(path, data):
@@ -134,10 +134,78 @@ def test_audit_pack_cli_creates_review_package():
         assert "commit-governance" in text
         assert "第001章_测试.md" in text
         assert "第005章_测试.json" in text
+        assert "测试原文。" in text
         assert "顶层介绍" in text
         assert "阶段性故事简介" in text
 
     print("[OK] audit-pack CLI 生成周期审计任务包")
+
+
+def test_audit_pack_falls_back_to_story_index_when_full_story_exceeds_budget():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        story = empty_story()
+        story["介绍"]["描述"] = "结构详情" * 6000
+        write_json(project / "故事结构_增量.json", story)
+        write_completed_chapter(project, 1)
+
+        pack = write_audit_pack(project, 1, 1, max_context_chars=12000)
+
+        assert pack is not None
+        text = pack.read_text(encoding="utf-8")
+        assert "## 当前故事结构索引" in text
+        assert "## 完整故事结构" not in text
+        status = load_status(project / "质量治理" / "周期审计" / "audit_001-001.status.json")
+        assert status["context"]["render_mode"] == "story_index_relevant"
+
+
+def test_audit_pack_keeps_full_story_for_large_file_when_budget_allows():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        story = empty_story()
+        story["padding"] = "x" * 150000
+        write_json(project / "故事结构_增量.json", story)
+        write_completed_chapter(project, 1)
+
+        pack = write_audit_pack(project, 1, 1, max_context_chars=220000)
+
+        assert pack is not None
+        status = load_status(next(project.rglob("audit_001-001.status.json")))
+        assert status["context"]["render_mode"] == "full_story"
+        assert status["context"]["attempts"][0]["render_mode"] == "full_story"
+
+
+def test_audit_pack_attempts_full_story_before_fallback_for_very_large_file():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        story = empty_story()
+        story["padding"] = "x" * 250000
+        write_json(project / "故事结构_增量.json", story)
+        write_completed_chapter(project, 1)
+
+        pack = write_audit_pack(project, 1, 1, max_context_chars=12000)
+
+        assert pack is not None
+        status = load_status(next(project.rglob("audit_001-001.status.json")))
+        attempts = [attempt["render_mode"] for attempt in status["context"]["attempts"]]
+        assert attempts[:2] == ["full_story", "story_index_relevant"]
+        assert status["context"]["render_mode"] == "story_index_relevant"
+
+
+def test_audit_pack_blocks_instead_of_truncating_current_evidence_when_context_overflows():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        chapter = write_completed_chapter(project, 1)
+        chapter.write_text("原文证据" * 10000, encoding="utf-8")
+
+        pack = write_audit_pack(project, 1, 1, max_context_chars=12000)
+
+        assert pack is None
+        status = load_status(project / "质量治理" / "周期审计" / "audit_001-001.status.json")
+        assert status["status"] == "blocked_context"
+        assert status["context"]["current_evidence_chars"] >= len("原文证据" * 10000)
+        assert not (project / "质量治理" / "周期审计" / "audit_001-001.md").exists()
 
 
 def test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch():

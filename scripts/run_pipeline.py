@@ -99,11 +99,24 @@ MULTI_UNIT_ARTIFACT_RE = re.compile(r"^第\d+\s*(?:-|—|–|~|～|至|到)\s*\d
 # 之类的更短值，让卡死的子进程更快暴露而不是等满 10 分钟。
 INTERNAL_COMMAND_TIMEOUT_SECONDS = int(os.getenv("ND_COMMAND_TIMEOUT", "600"))
 
+# 周期审计由外部 Agent 执行，脚本无法得知实际模型 tokenizer，故采用可配置的
+# 字符预算而不伪造精确 token 计数。默认值为 256k 上下文模型预留输出、系统提示和
+# 工具调用后的保守输入上限；调用方可按实际模型覆盖。
+DEFAULT_AUDIT_MAX_CONTEXT_CHARS = 160_000
+AUDIT_CONTEXT_FORMAT_VERSION = 2
+
 
 def non_negative_int(value: str) -> int:
     parsed = int(value)
     if parsed < 0:
         raise argparse.ArgumentTypeError("必须为非负整数")
+    return parsed
+
+
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("必须为正整数")
     return parsed
 
 
@@ -448,8 +461,16 @@ def recover_story_from_snapshot(project_dir: Path, snapshot_seq: Optional[int] =
     shutil.copy2(snapshot, story)
     print(f"已从快照恢复过程库: story_after_ch{snapshot_seq:03d}.json -> 故事结构_增量.json")
 
+    due_audits = committed_audits_due_for_recovery(project_dir, snapshot_seq, to_seq)
+    rc = replay_committed_audits_after_recovery(project_dir, snapshot_seq, due_audits)
+    if rc != 0:
+        return rc
+
     for seq in range(snapshot_seq + 1, to_seq + 1):
         rc = replay_one_delta(project_dir, seq)
+        if rc != 0:
+            return rc
+        rc = replay_committed_audits_after_recovery(project_dir, seq, due_audits)
         if rc != 0:
             return rc
 
@@ -545,6 +566,13 @@ def read_excerpt(path: Path, limit: int = 12000) -> str:
     return text
 
 
+def read_audit_evidence(path: Path) -> str:
+    """读取周期审计的当前证据，缺失时显式保留缺失信息而不静默置空。"""
+    if not path.is_file():
+        return f"[缺失] {path}"
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
 def get_previous_correction(project_dir: Path, current_start: int) -> Optional[Dict[str, str]]:
     """返回上一周期 correction JSON 的 {name, content}，无则 None。"""
     if current_start <= 1:
@@ -576,10 +604,10 @@ def extract_relevant_elements_for_audit(story_data: dict, project_dir: Path, sta
                     for item in bucket.get(c_key, []):
                         if isinstance(item, dict) and item.get("名称"):
                             names_mentioned.add(item["名称"])
-                            
+
     if not names_mentioned:
         return "无"
-        
+
     relevant = []
     for key in COLLECTION_KEYS:
         for item in story_data.get(key, []):
@@ -601,35 +629,33 @@ def extract_relevant_elements_for_audit(story_data: dict, project_dir: Path, sta
     return res
 
 
-def write_audit_pack(project_dir: Path, start: int, end: int, force: bool = False) -> Path:
+def write_audit_pack(
+    project_dir: Path,
+    start: int,
+    end: int,
+    force: bool = False,
+    max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+) -> Optional[Path]:
+    """生成一个周期治理包，必要时只降载历史结构；绝不截断本周期证据。"""
     init_dirs(project_dir)
     story = ensure_story(project_dir)
     paths = audit_paths(project_dir, start, end)
     if paths["pack"].exists() and not force:
-        if not paths["status"].is_file():
-            save_json(paths["status"], {
-                "status": "queued",
-                "range": f"{start:03d}-{end:03d}",
-                "audit_pack": str(paths["pack"]),
-                "correction_path": str(paths["correction"]),
-                "created_at": datetime.now().isoformat(),
-            })
-        print(f"周期审计任务包已存在: {paths['pack']}")
-        return paths["pack"]
+        existing_status = load_json(paths["status"], {}) if paths["status"].is_file() else {}
+        existing_context = existing_status.get("context", {}) if isinstance(existing_status, dict) else {}
+        if (
+            isinstance(existing_context, dict)
+            and existing_context.get("format_version") == AUDIT_CONTEXT_FORMAT_VERSION
+            and existing_context.get("max_context_chars") == max_context_chars
+        ):
+            print(f"周期审计任务包已存在: {paths['pack']}")
+            return paths["pack"]
+        print("周期审计任务包上下文格式或预算已变化，重新生成。")
 
-    story_size = story.stat().st_size if story.is_file() else 0
     story_data = load_json(story, {})
-
-    full_story_json = ""
-    story_index = ""
-    relevant_details = ""
-    if story_size < 100 * 1024:
-        full_story_json = json.dumps(story_data, ensure_ascii=False, indent=2)
-    elif story_size <= 200 * 1024:
-        story_index = build_lightweight_index(story)
-    else:
-        story_index = build_lightweight_index(story)
-        relevant_details = extract_relevant_elements_for_audit(story_data, project_dir, start, end)
+    full_story_json = json.dumps(story_data, ensure_ascii=False, indent=2)
+    story_index = build_lightweight_index(story)
+    relevant_details = extract_relevant_elements_for_audit(story_data, project_dir, start, end)
 
     chapters: List[Dict[str, Any]] = []
     for seq in range(start, end + 1):
@@ -644,35 +670,82 @@ def write_audit_pack(project_dir: Path, start: int, end: int, force: bool = Fals
             "chapter_path": p["chapter"],
             "analysis_path": p["analysis"],
             "delta_path": p["delta"],
-            "analysis_excerpt": read_excerpt(p["analysis"]),
-            "delta_excerpt": read_excerpt(p["delta"]),
+            "chapter_text": read_audit_evidence(p["chapter"]),
+            "analysis_text": read_audit_evidence(p["analysis"]),
+            "delta_text": read_audit_evidence(p["delta"]),
         })
 
     taxonomy_path = Path(__file__).resolve().parent.parent / "references" / "narrative_taxonomy.json"
     taxonomy_json = taxonomy_path.read_text(encoding="utf-8", errors="ignore") if taxonomy_path.is_file() else ""
-
-    content = render_prompt(
-        "audit.j2",
-        start=start,
-        end=end,
-        correction_path=paths["correction"],
-        run_pipeline_path=script_path("run_pipeline.py"),
-        project_dir=project_dir,
-        full_story_json=full_story_json,
-        story_index=story_index,
-        relevant_details=relevant_details,
-        previous_correction=get_previous_correction(project_dir, start),
-        chapters=chapters,
-        taxonomy_json=taxonomy_json,
+    previous_correction = get_previous_correction(project_dir, start)
+    current_evidence_chars = sum(
+        len(ch.get("chapter_text", ""))
+        + len(ch.get("analysis_text", ""))
+        + len(ch.get("delta_text", ""))
+        for ch in chapters
     )
 
+    mode_contexts = {
+        "full_story": (full_story_json, "", ""),
+        "story_index": ("", story_index, ""),
+        "story_index_relevant": ("", story_index, relevant_details),
+    }
+    fallback_modes = ["full_story", "story_index_relevant", "story_index"]
+    attempts: List[Dict[str, Any]] = []
+    selected_content = ""
+    selected_mode = ""
+    for mode in fallback_modes:
+        candidate_full_story, candidate_index, candidate_details = mode_contexts[mode]
+        candidate = render_prompt(
+            "audit.j2",
+            start=start,
+            end=end,
+            correction_path=paths["correction"],
+            run_pipeline_path=script_path("run_pipeline.py"),
+            project_dir=project_dir,
+            full_story_json=candidate_full_story,
+            story_index=candidate_index,
+            relevant_details=candidate_details,
+            previous_correction=previous_correction,
+            chapters=chapters,
+            taxonomy_json=taxonomy_json,
+        )
+        attempts.append({"render_mode": mode, "rendered_chars": len(candidate)})
+        if len(candidate) <= max_context_chars:
+            selected_content = candidate
+            selected_mode = mode
+            break
+
+    context = {
+        "format_version": AUDIT_CONTEXT_FORMAT_VERSION,
+        "max_context_chars": max_context_chars,
+        "current_evidence_chars": current_evidence_chars,
+        "attempts": attempts,
+    }
+    if not selected_content:
+        context["render_mode"] = "blocked_context"
+        save_json(paths["status"], {
+            "status": "blocked_context",
+            "range": f"{start:03d}-{end:03d}",
+            "audit_pack": str(paths["pack"]),
+            "correction_path": str(paths["correction"]),
+            "context": context,
+            "action": "提高 --audit-max-context-chars，或减小 --audit-interval 后重新生成；不得截断本周期原文、分析或 Delta。",
+            "created_at": datetime.now().isoformat(),
+        })
+        print(f"周期审计 {start:03d}-{end:03d} 上下文超限，未生成不完整任务包。见: {paths['status']}")
+        return None
+
+    context["render_mode"] = selected_mode
+    context["rendered_chars"] = len(selected_content)
     paths["pack"].parent.mkdir(parents=True, exist_ok=True)
-    paths["pack"].write_text(content, encoding="utf-8")
+    paths["pack"].write_text(selected_content, encoding="utf-8")
     save_json(paths["status"], {
         "status": "queued",
         "range": f"{start:03d}-{end:03d}",
         "audit_pack": str(paths["pack"]),
         "correction_path": str(paths["correction"]),
+        "context": context,
         "created_at": datetime.now().isoformat(),
     })
     print(f"已生成周期审计任务包: {paths['pack']}")
@@ -697,6 +770,53 @@ def unresolved_audits(project_dir: Path) -> List[Dict[str, Any]]:
     return audits
 
 
+def committed_audits_due_for_recovery(project_dir: Path, snapshot_seq: int, to_seq: int) -> List[Dict[str, Any]]:
+    audit_dir = project_dir / "质量治理" / "周期审计"
+    if not audit_dir.is_dir():
+        return []
+    due: List[Dict[str, Any]] = []
+    for path in sorted(audit_dir.glob("audit_*.status.json")):
+        data = load_json(path, None)
+        if not isinstance(data, dict) or data.get("status") != "committed":
+            continue
+        m = re.match(r"^(\d{3})-(\d{3})$", str(data.get("range", "")))
+        if not m:
+            m = re.match(r"^audit_(\d{3})-(\d{3})\.status\.json$", path.name)
+        if not m:
+            continue
+        start = int(m.group(1))
+        end = int(m.group(2))
+        if snapshot_seq <= end <= to_seq:
+            data["_start"] = start
+            data["_end"] = end
+            data["_status_path"] = str(path)
+            due.append(data)
+    return due
+
+
+def replay_committed_audits_after_recovery(project_dir: Path, seq: int, due_audits: List[Dict[str, Any]]) -> int:
+    for audit in due_audits:
+        if audit.get("_end") != seq or audit.get("_replayed"):
+            continue
+        start = int(audit["_start"])
+        end = int(audit["_end"])
+        paths = audit_paths(project_dir, start, end)
+        correction = Path(str(audit.get("correction_path") or paths["correction"]))
+        if not correction.is_file() or correction.stat().st_size == 0:
+            update_audit_status(
+                paths,
+                status="awaiting_agent",
+                action="recover-story 已回退到该周期治理之前的章节快照，但找不到已提交的 correction；请补齐治理补丁后重新运行 run。",
+            )
+            print(f"恢复暂停: 缺少需重放的周期治理补丁 {correction}")
+            return 2
+        rc = commit_governance(project_dir, str(correction))
+        if rc != 0:
+            return rc
+        audit["_replayed"] = True
+    return 0
+
+
 def update_audit_status(paths: Dict[str, Path], **updates: Any) -> None:
     data = load_json(paths["status"], {}) if paths["status"].is_file() else {}
     if not isinstance(data, dict):
@@ -710,9 +830,12 @@ def run_periodic_governance(
     project_dir: Path,
     start: int,
     end: int,
+    max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
 ) -> int:
     paths = audit_paths(project_dir, start, end)
-    write_audit_pack(project_dir, start, end)
+    pack = write_audit_pack(project_dir, start, end, max_context_chars=max_context_chars)
+    if pack is None:
+        return 1
     if not paths["correction"].is_file() or paths["correction"].stat().st_size == 0:
         update_audit_status(
             paths,
@@ -1034,17 +1157,94 @@ def cmd_resume(project_dir: Path) -> int:
     return 0
 
 
+def cmd_run_analysis(project_dir: Path) -> int:
+    """Create and validate every chapter-analysis MD without touching Delta flow."""
+    init_dirs(project_dir)
+    if not guard_single_unit_artifacts(project_dir):
+        return 1
+    ensure_story(project_dir)
+    files = chapter_files(project_dir)
+    if not files:
+        print("原文拆解目录中没有章节。先执行 split。")
+        return 1
+    for chapter in files:
+        p = artifact_paths(project_dir, chapter)
+        if not p["analysis"].is_file():
+            prepare_chapter_analysis(project_dir, chapter)
+            print("已交接：等待章节分析MD。")
+            return 2
+        analysis_ok, analysis_errors = validate_chapter_analysis_file(p["analysis"])
+        if not analysis_ok:
+            write_analysis_regenerate_task(project_dir, chapter, analysis_errors)
+            print("已交接：等待从原文重新生成完整章节分析MD。")
+            return 2
+        p["analysis_regenerate_task"].unlink(missing_ok=True)
+    print("所有章节分析MD均已通过校验。")
+    return 0
+
+
+def cmd_run_delta(
+    project_dir: Path,
+    max_chapters: int = 0,
+    audit_interval: int = 5,
+    audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+) -> int:
+    """Require all chapter analyses before entering the existing serial Delta flow."""
+    init_dirs(project_dir)
+    if not guard_single_unit_artifacts(project_dir):
+        return 1
+    ensure_story(project_dir)
+    files = chapter_files(project_dir)
+    if not files:
+        print("原文拆解目录中没有章节。先执行 split。")
+        return 1
+    for chapter in files:
+        p = artifact_paths(project_dir, chapter)
+        if not p["analysis"].is_file():
+            prepare_chapter_analysis(project_dir, chapter)
+            print("Delta阶段已交接：等待全部章节分析MD通过校验。")
+            return 2
+        analysis_ok, analysis_errors = validate_chapter_analysis_file(p["analysis"])
+        if not analysis_ok:
+            write_analysis_regenerate_task(project_dir, chapter, analysis_errors)
+            print("Delta阶段已交接：等待全部章节分析MD通过校验。")
+            return 2
+        p["analysis_regenerate_task"].unlink(missing_ok=True)
+    return cmd_run(
+        project_dir,
+        max_chapters=max_chapters,
+        audit_interval=audit_interval,
+        audit_max_context_chars=audit_max_context_chars,
+    )
+
+
 def cmd_run(
     project_dir: Path,
     max_chapters: int = 0,
     audit_interval: int = 5,
+    phase: str = "",
+    audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
 ) -> int:
+    if phase == "analysis":
+        return cmd_run_analysis(project_dir)
+    if phase == "delta":
+        return cmd_run_delta(
+            project_dir,
+            max_chapters=max_chapters,
+            audit_interval=audit_interval,
+            audit_max_context_chars=audit_max_context_chars,
+        )
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
         return 1
     ensure_story(project_dir)
     for audit in unresolved_audits(project_dir):
-        rc = run_periodic_governance(project_dir, audit["_start"], audit["_end"])
+        rc = run_periodic_governance(
+            project_dir,
+            audit["_start"],
+            audit["_end"],
+            audit_max_context_chars,
+        )
         if rc != 0:
             return rc
     processed = 0
@@ -1074,7 +1274,7 @@ def cmd_run(
         processed += 1
         if audit_interval and seq % audit_interval == 0:
             start = seq - audit_interval + 1
-            rc = run_periodic_governance(project_dir, start, seq)
+            rc = run_periodic_governance(project_dir, start, seq, audit_max_context_chars)
             if rc != 0:
                 return rc
         if max_chapters and processed >= max_chapters:
@@ -1159,7 +1359,6 @@ def cmd_final_pack(project_dir: Path, force: bool = False) -> int:
     report = audit_dir / "validate_report.txt"
     run_cmd([sys.executable, str(script_path("validate_structure.py")),
              "--mode", "final", str(draft)], report)
-
     # 收集材料生成任务包
     task_pack = audit_dir / "final_task_pack.md"
 
@@ -1328,8 +1527,8 @@ def cmd_audit_pack(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(exc)
         return 1
-    write_audit_pack(project_dir, start, end, force=args.force)
-    return 0
+    pack = write_audit_pack(project_dir, start, end, force=args.force, max_context_chars=args.max_context_chars)
+    return 0 if pack is not None else 1
 
 def cmd_split(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir)
@@ -1505,6 +1704,8 @@ def main() -> int:
     p_run.add_argument("project_dir")
     p_run.add_argument("--max-chapters", type=int, default=0)
     p_run.add_argument("--audit-interval", type=int, default=5, help="每N章执行一次自动周期治理；0表示关闭")
+    p_run.add_argument("--audit-max-context-chars", type=positive_int, default=DEFAULT_AUDIT_MAX_CONTEXT_CHARS, help="周期审计单包最大字符数；默认按256k上下文模型预留输出和安全余量")
+    p_run.add_argument("--phase", choices=["auto", "analysis", "delta"], default="auto", help="运行阶段：auto=旧逐章流程；analysis=只循环生成/校验章节分析MD；delta=先要求全部MD合格，再循环生成/提交结构JSON")
 
     p_resume = sub.add_parser("resume", help="查看下一步缺什么")
     p_resume.add_argument("project_dir")
@@ -1532,6 +1733,7 @@ def main() -> int:
     p_audit.add_argument("project_dir")
     p_audit.add_argument("--chapters", required=True, help="章节范围，例如 1-5 或 1-10")
     p_audit.add_argument("--force", action="store_true")
+    p_audit.add_argument("--max-context-chars", type=positive_int, default=DEFAULT_AUDIT_MAX_CONTEXT_CHARS, help="周期审计单包最大字符数；默认按256k上下文模型预留输出和安全余量")
 
     p_pack = sub.add_parser("analysis-pack", help="生成全书/局部分析任务包")
     p_pack.add_argument("project_dir")
@@ -1584,7 +1786,13 @@ def main() -> int:
     if args.cmd == "commit-chapter":
         return commit_chapter(project_dir, args.chapter, args.force)
     if args.cmd == "run":
-        return cmd_run(project_dir, args.max_chapters, args.audit_interval)
+        return cmd_run(
+            project_dir,
+            args.max_chapters,
+            args.audit_interval,
+            phase=args.phase,
+            audit_max_context_chars=args.audit_max_context_chars,
+        )
     if args.cmd == "resume":
         return cmd_resume(project_dir)
     if args.cmd == "recover-story":

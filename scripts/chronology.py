@@ -197,13 +197,13 @@ def event_group_name(event: dict[str, Any]) -> str:
 
 
 def assign_event_group_orders(events: list[dict[str, Any]], *, split_repeated: bool = False) -> None:
-    """Assign visible ranks to contiguous plot-segment runs without moving events.
+    """Assign visible ranks to chapter-local plot-segment runs without moving events.
 
-    A group is a page-level plot segment, not a reusable topic label. Migration
-    can split legacy repeated names into ``名称续2``; normal processing leaves
-    such reuse visible for the structure validator to reject.
+    A group is a page-level plot segment scoped to its first involved chapter.
+    The same short name may be used again in another chapter, but a same-chapter
+    non-contiguous reuse remains a separate segment during migration.
     """
-    runs: list[tuple[str, list[dict[str, Any]]]] = []
+    runs: list[tuple[tuple[str, int | None], list[dict[str, Any]]]] = []
     for event in events:
         base_name = event_group_name(event)
         # Do not turn a missing/number-only name into ``00000010-0001``.  Keeping
@@ -211,17 +211,19 @@ def assign_event_group_orders(events: list[dict[str, Any]], *, split_repeated: b
         # clearly instead of laundering it into a plausible-looking group.
         if not is_semantic_event_group_name(base_name):
             continue
-        if runs and runs[-1][0] == base_name:
+        run_key = (base_name, first_involved_chapter(event))
+        if runs and runs[-1][0] == run_key:
             runs[-1][1].append(event)
         else:
-            runs.append((base_name, [event]))
+            runs.append((run_key, [event]))
 
-    occurrences: dict[str, int] = {}
-    for run_index, (base_name, members) in enumerate(runs, start=1):
-        occurrences[base_name] = occurrences.get(base_name, 0) + 1
+    occurrences: dict[tuple[str, int | None], int] = {}
+    for run_index, ((base_name, chapter_scope), members) in enumerate(runs, start=1):
+        occurrence_key = (base_name, chapter_scope)
+        occurrences[occurrence_key] = occurrences.get(occurrence_key, 0) + 1
         display_name = base_name
-        if split_repeated and occurrences[base_name] > 1:
-            display_name = f"{base_name}续{occurrences[base_name]}"
+        if split_repeated and occurrences[occurrence_key] > 1:
+            display_name = f"{base_name}续{occurrences[occurrence_key]}"
         rank = run_index * 10
         rank_text = format_event_group_rank(rank)
         for member in members:
@@ -229,10 +231,10 @@ def assign_event_group_orders(events: list[dict[str, Any]], *, split_repeated: b
 
 
 def event_group_order_errors(events: list[dict[str, Any]]) -> list[str]:
-    """Validate sorted, contiguous page groups while preserving event-array order."""
+    """Validate chapter-local, contiguous page groups without moving events."""
     errors: list[str] = []
-    active_name = ""
-    closed_names: set[str] = set()
+    active_key: tuple[str, int | None] | None = None
+    closed_keys: set[tuple[str, int | None]] = set()
     expected_rank = 10
 
     for index, event in enumerate(events):
@@ -249,16 +251,17 @@ def event_group_order_errors(events: list[dict[str, Any]]) -> list[str]:
         if name_errors:
             errors.extend(f"事件[{index}].分组 {error}" for error in name_errors)
             continue
-        if name != active_name:
-            if active_name:
-                closed_names.add(active_name)
-            if name in closed_names:
-                errors.append(f"事件[{index}].分组 非连续复用剧情段名称[{name}]；请拆分为新的剧情段")
+        group_key = (name, first_involved_chapter(event))
+        if group_key != active_key:
+            if active_key is not None:
+                closed_keys.add(active_key)
+            if group_key in closed_keys:
+                errors.append(f"事件[{index}].分组 在同一章节内非连续复用剧情段名称[{name}]；请拆分为新的剧情段")
             expected_rank_text = format_event_group_rank(expected_rank)
             if rank != expected_rank or rank_text != expected_rank_text:
                 actual_rank_text = rank_text or str(rank)
                 errors.append(f"事件[{index}].分组 段号应为{expected_rank_text}，实际为{actual_rank_text}")
-            active_name = name
+            active_key = group_key
             expected_rank += 10
         elif rank != expected_rank - 10:
             errors.append(f"事件[{index}].分组 与当前连续剧情段的段号不一致")

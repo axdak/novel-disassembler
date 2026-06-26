@@ -18,6 +18,7 @@ agent_created: true
 6. 用户要求持续拆书时，主控Agent必须自主循环：`run_pipeline.py run` 返回 `2` 表示有待办任务包，不是失败；立即完成任务包指定产物并再次运行，不在章节、修复或周期审计之间等待用户指令。
 7. 周期审计必须由主控Agent读取任务包后产出真实 `correction_XXX.json`；不得通过空 Delta、伪造 worker 或跳过审计来解除待办。
 8. 单章必须分两次独立模型分析：`task_chNNN_analysis.md` 只产出章节分析MD；重新运行后生成的 `task_chNNN_delta.md` 才读取该MD并只产出Delta JSON。不得在分析任务中写Delta，也不得在Delta任务中重写分析MD。
+   - 如需先批量完成全部章节分析，再进入结构 JSON 阶段，使用 `run_pipeline.py run --phase analysis` 循环到返回 `0`，再使用 `run_pipeline.py run --phase delta` 循环推进 Delta 与提交。未指定 `--phase` 时保持逐章交错流程。
 9. 章节分析MD和Delta JSON的语义内容必须来自模型对本章原文、章节分析和当前结构索引的阅读理解。禁止编写或运行 Python/Bash/PowerShell 等脚本来批量生成、补全、扩写或替代角色、事件、地点、线索、阵营、物品、其他事项等语义内容。
 10. 允许使用项目已有确定性修复脚本，或必要时使用一次性 format-only 修复脚本，处理已经存在的当前章节 Delta JSON 的语法、字符串转义、字段类型、章节时间、标签压缩等机械格式问题；这类脚本不得新增剧情事实、不得新增语义元素、不得读取原文生成内容、不得以提高效率或推进多章为目的复用。
 11. LLM API 自动生成模式是未来可选能力，默认关闭；未显式配置并授权前，`run_pipeline.py` 只生成任务包并由主控Agent/人工按任务包产出。

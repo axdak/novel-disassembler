@@ -5,11 +5,13 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(ROOT))
 
-from run_pipeline import recover_story_from_snapshot
+import run_pipeline
+from run_pipeline import audit_paths, recover_story_from_snapshot
 
 
 def write_json(path, data):
@@ -79,6 +81,50 @@ def test_recover_from_snapshot_replays_later_deltas():
         assert (project / "故事结构版本" / "story_after_ch003.json").is_file()
 
     print("[OK] 可从快照恢复并重放后续Delta")
+
+
+def test_recover_replays_committed_periodic_governance_at_restored_boundary():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        version_dir = project / "故事结构版本"
+        version_dir.mkdir(parents=True, exist_ok=True)
+        write_json(version_dir / "story_after_ch005.json", {"order": []})
+
+        paths = audit_paths(project, 1, 5)
+        write_json(paths["correction"], {"governance": True})
+        write_json(paths["status"], {
+            "status": "committed",
+            "range": "001-005",
+            "correction_path": str(paths["correction"]),
+        })
+
+        calls = []
+
+        def fake_commit_governance(project_dir, patch_path):
+            calls.append(("audit", Path(patch_path).name))
+            story_path = Path(project_dir) / "故事结构_增量.json"
+            story = json.loads(story_path.read_text(encoding="utf-8"))
+            story["order"].append("audit_001-005")
+            write_json(story_path, story)
+            return 0
+
+        def fake_replay_one_delta(project_dir, seq):
+            calls.append(("delta", seq))
+            story_path = Path(project_dir) / "故事结构_增量.json"
+            story = json.loads(story_path.read_text(encoding="utf-8"))
+            story["order"].append(f"ch{seq:03d}")
+            write_json(story_path, story)
+            return 0
+
+        with patch.object(run_pipeline, "commit_governance", side_effect=fake_commit_governance), patch.object(
+            run_pipeline, "replay_one_delta", side_effect=fake_replay_one_delta
+        ):
+            rc = recover_story_from_snapshot(project, snapshot_seq=5, to_seq=6)
+
+        assert rc == 0
+        assert calls == [("audit", "correction_001-005.json"), ("delta", 6)]
+        story = json.loads((project / "故事结构_增量.json").read_text(encoding="utf-8"))
+        assert story["order"] == ["audit_001-005", "ch006"]
 
 
 if __name__ == "__main__":

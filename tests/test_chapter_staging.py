@@ -2,6 +2,7 @@
 """章节分析与 Delta 两阶段交接测试。"""
 
 import json
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -126,7 +127,108 @@ def test_run_regenerates_structurally_shrunken_analysis_before_delta_handoff():
     print("[OK] 缩水章节分析会重新生成，不能直接交接Delta")
 
 
+def test_analysis_phase_completes_all_valid_md_without_creating_delta_artifacts():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        chapters = []
+        for seq in (1, 2):
+            chapter = project / "原文拆解" / f"第{seq:03d}章_测试.md"
+            chapter.parent.mkdir(parents=True, exist_ok=True)
+            chapter.write_text(f"# 第{seq:03d}章\n测试原文。\n", encoding="utf-8")
+            chapters.append((seq, chapter, artifact_paths(project, chapter)))
+
+        assert cmd_run(project, audit_interval=0, phase="analysis") == 2
+        assert chapters[0][2]["analysis_task"].is_file()
+        assert not chapters[0][2]["delta_task"].exists()
+
+        chapters[0][2]["analysis"].write_text(valid_analysis(1), encoding="utf-8")
+        assert cmd_run(project, audit_interval=0, phase="analysis") == 2
+        assert chapters[1][2]["analysis_task"].is_file()
+        assert not chapters[1][2]["delta_task"].exists()
+
+        chapters[1][2]["analysis"].write_text(valid_analysis(2), encoding="utf-8")
+        assert cmd_run(project, audit_interval=0, phase="analysis") == 0
+        assert not any(paths["delta_task"].exists() for _, _, paths in chapters)
+        assert not any(paths["delta"].exists() for _, _, paths in chapters)
+        assert not list((project / "故事结构版本").glob("story_*"))
+
+
+def test_analysis_phase_hands_off_regeneration_for_invalid_md_only():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        chapter = project / "原文拆解" / "第001章_测试.md"
+        chapter.parent.mkdir(parents=True, exist_ok=True)
+        chapter.write_text("# 第001章\n测试原文。\n", encoding="utf-8")
+        paths = artifact_paths(project, chapter)
+        paths["analysis"].parent.mkdir(parents=True, exist_ok=True)
+        paths["analysis"].write_text("# 第001章分析\n本章发生了一件事。\n", encoding="utf-8")
+
+        assert cmd_run(project, audit_interval=0, phase="analysis") == 2
+        assert paths["analysis_regenerate_task"].is_file()
+        assert not paths["delta_task"].exists()
+        assert not paths["delta"].exists()
+
+
+def test_run_cli_phase_analysis_generates_analysis_task_without_delta_task():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        chapter = project / "原文拆解" / "第001章_测试.md"
+        chapter.parent.mkdir(parents=True, exist_ok=True)
+        chapter.write_text("# 第001章\n测试原文。\n", encoding="utf-8")
+        paths = artifact_paths(project, chapter)
+
+        rc = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "run_pipeline.py"),
+                "run",
+                str(project),
+                "--audit-interval",
+                "0",
+                "--phase",
+                "analysis",
+            ],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+
+        assert rc.returncode == 2
+        assert paths["analysis_task"].is_file()
+        assert not paths["delta_task"].exists()
+        assert not paths["delta"].exists()
+
+
+def test_delta_phase_requires_every_analysis_md_before_first_delta_task():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        chapters = []
+        for seq in (1, 2):
+            chapter = project / "原文拆解" / f"第{seq:03d}章_测试.md"
+            chapter.parent.mkdir(parents=True, exist_ok=True)
+            chapter.write_text(f"# 第{seq:03d}章\n测试原文。\n", encoding="utf-8")
+            paths = artifact_paths(project, chapter)
+            paths["analysis"].parent.mkdir(parents=True, exist_ok=True)
+            chapters.append(paths)
+        chapters[0]["analysis"].write_text(valid_analysis(1), encoding="utf-8")
+
+        assert cmd_run(project, audit_interval=0, phase="delta") == 2
+        assert chapters[1]["analysis_task"].is_file()
+        assert not chapters[0]["delta_task"].exists()
+        assert not chapters[0]["delta"].exists()
+        assert not list((project / "故事结构版本").glob("story_*"))
+
+
 if __name__ == "__main__":
     test_run_hands_off_analysis_then_delta_before_committing()
     test_run_regenerates_structurally_shrunken_analysis_before_delta_handoff()
+    test_analysis_phase_completes_all_valid_md_without_creating_delta_artifacts()
+    test_analysis_phase_hands_off_regeneration_for_invalid_md_only()
+    test_run_cli_phase_analysis_generates_analysis_task_without_delta_task()
+    test_delta_phase_requires_every_analysis_md_before_first_delta_task()
     print("\n全部测试通过 [PASS]")

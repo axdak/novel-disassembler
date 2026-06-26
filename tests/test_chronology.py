@@ -113,8 +113,12 @@ def test_group_order_uses_plot_segment_rank_without_reordering_group_members():
     ]
     assign_event_group_orders(events)
     assert [item["名称"] for item in events] == ["第050章事件", "第029章事件", "第043章事件"]
-    assert {item["分组"] for item in events} == {"00000010-成人仪式"}
-    print("[OK] 剧情段序号分组且不改事件原顺序")
+    assert [item["分组"] for item in events] == [
+        "00000010-成人仪式",
+        "00000020-成人仪式",
+        "00000030-成人仪式",
+    ]
+    print("[OK] 剧情段不跨章节且不改事件原顺序")
 
 
 def test_migration_drops_legacy_trace_and_stably_orders_events():
@@ -174,7 +178,7 @@ def test_structure_validator_rejects_legacy_trace_in_final_elements():
     print("[OK] 结构校验器拒绝最终元素中的旧追溯字段")
 
 
-def test_group_order_uses_plot_segment_rank_not_chapter_number():
+def test_group_order_splits_same_plot_segment_at_chapter_boundary():
     events = [
         event("退婚冲突", "0003", "退婚事件"),
         event("退婚反击", "0004", "退婚事件"),
@@ -183,10 +187,10 @@ def test_group_order_uses_plot_segment_rank_not_chapter_number():
     assign_event_group_orders(events)
     assert [item["分组"] for item in events] == [
         "00000010-退婚事件",
-        "00000010-退婚事件",
-        "00000020-历练事件",
+        "00000020-退婚事件",
+        "00000030-历练事件",
     ]
-    print("[OK] 连续剧情段按段号分组，不按章节号拆分")
+    print("[OK] 相同剧情短名在章节边界切为新段")
 
 
 def test_group_order_rebuild_preserves_free_plot_segment_detail():
@@ -211,7 +215,7 @@ def test_group_order_rebuild_preserves_free_plot_segment_detail():
 def test_numeric_only_group_uses_plot_segment_detail_instead_of_number_suffix():
     events = [
         event("坊市筹资", "0003", "0001"),
-        event("出售药材", "0004", "0001"),
+        event("出售药材", "0003", "0001"),
     ]
     for item in events:
         item["详情"]["剧情段"] = "坊市筹资"
@@ -238,7 +242,7 @@ def test_assigner_does_not_launder_number_only_group_into_ranked_group():
 def test_group_order_uses_eight_digit_rank_and_keeps_compact_semantic_name():
     events = [
         event("退婚冲突", "0003", "退婚尊严线冲突爆发羞辱反击身份尊严"),
-        event("退婚反击", "0004", "退婚尊严线冲突爆发羞辱反击身份尊严"),
+        event("退婚反击", "0003", "退婚尊严线冲突爆发羞辱反击身份尊严"),
     ]
     assign_event_group_orders(events)
     assert [item["分组"] for item in events] == [
@@ -305,12 +309,12 @@ def test_migration_splits_noncontiguous_legacy_group_runs():
     assert [item["分组"] for item in migrated["事件集"]] == [
         "00000010-经济线",
         "00000020-历练事件",
-        "00000030-经济线续2",
+        "00000030-经济线",
     ]
-    print("[OK] 存量迁移拆分非连续旧分组")
+    print("[OK] 存量迁移按章节拆分同名旧分组")
 
 
-def test_structure_validator_rejects_noncontiguous_reuse_of_plot_segment_name():
+def test_structure_validator_allows_same_plot_segment_name_in_different_chapters():
     story = empty_story()
     story["事件集"] = [
         event("坊市筹资", "0003", "00000010-坊市筹资"),
@@ -318,8 +322,8 @@ def test_structure_validator_rejects_noncontiguous_reuse_of_plot_segment_name():
         event("拍卖会竞价", "0018", "00000030-坊市筹资"),
     ]
     errors, _ = validate_exact_story_schema(story, mode="process")
-    assert any("非连续复用" in error for error in errors), errors
-    print("[OK] 结构校验拒绝非连续复用同一剧情段名称")
+    assert not any("非连续复用" in error for error in errors), errors
+    print("[OK] 结构校验允许跨章节复用同一剧情段短名")
 
 
 if __name__ == "__main__":

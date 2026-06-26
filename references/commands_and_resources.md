@@ -9,6 +9,14 @@ python <skill_path>/scripts/run_pipeline.py split <项目目录> <原文文件>
 python <skill_path>/scripts/run_pipeline.py run <项目目录>
 ```
 
+如果希望先批量完成所有章节分析 MD，再进入结构 JSON 阶段，可显式拆成两段运行：
+```bash
+python <skill_path>/scripts/run_pipeline.py run <项目目录> --phase analysis
+python <skill_path>/scripts/run_pipeline.py run <项目目录> --phase delta
+```
+
+`--phase analysis` 只生成/校验章节分析 MD，不创建 Delta 任务、不提交故事结构、不触发周期治理；`--phase delta` 会先要求所有章节分析 MD 通过现有校验，然后沿用原有串行 Delta 提交、快照、回滚和周期治理链。未指定 `--phase` 时保持旧的逐章交错流程。
+
 返回 `2` 后，主控Agent必须根据当前阶段任务包立即产出：
 ```text
 task_chNNN_analysis.md -> 章节处理/第NNN章_xxx.md

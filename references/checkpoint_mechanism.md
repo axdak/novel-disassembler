@@ -38,6 +38,8 @@
 
 `已完成章节` 的含义：该章 MD、Delta、Delta校验、合并、章节级校验均已通过，且已保存 `story_after_chNNN.json` 快照。
 
+可选两阶段运行时，`run --phase analysis` 生成并校验全部章节分析 MD，但这些 MD 只表示“分析阶段可继续”，不计入 `已完成章节`，也不会生成 `story_after_chNNN.json`。`run --phase delta` 会先检查全部 MD 均通过现有章节分析校验，再进入原有 Delta、合并、快照与治理链。
+
 ## 每章产物
 
 每章至少产生：
@@ -94,6 +96,8 @@ python <skill_path>/scripts/progress_manager.py reconcile <项目目录>
 - 是否有 `故事结构版本/story_after_chNNN.json`
 
 如果这些文件不完整，优先从最近可信快照恢复，并重放/重跑后续章节。
+
+使用 `recover-story --snapshot N --to M` 从章节快照恢复时，如果恢复区间内存在已提交的周期治理状态（例如从 `story_after_ch005.json` 恢复，而 `audit_001-005.status.json` 已是 `committed`），脚本会在对应章节边界重放 `correction_001-005.json`，再继续后续章节 Delta。若 correction 文件缺失或为空，恢复会暂停并把该周期审计状态改回 `awaiting_agent`，避免静默丢失治理补丁。
 
 ### 4. 进度记录完成，但快照缺失
 

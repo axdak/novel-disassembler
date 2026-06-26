@@ -11,6 +11,19 @@
   -> 返回 1：读取校验报告、修复任务包和相关产物，自行诊断并换一种修复策略后再次运行
 ```
 
+需要“先全书章节分析 MD、再结构 JSON”时，循环命令可拆为：
+
+```text
+先循环运行 run_pipeline.py run --phase analysis
+  -> 每次返回 2 都只完成章节分析或分析重生成任务
+  -> 返回 0 后，说明所有章节分析 MD 均通过现有校验
+
+再循环运行 run_pipeline.py run --phase delta
+  -> 先确认全部 MD 合格，再按原有串行规则生成 Delta、提交、快照和周期治理
+```
+
+`--phase analysis` 不会创建 Delta 任务，也不会更新故事结构；`--phase delta` 不会绕过 MD 校验。未指定 `--phase` 时仍使用旧的逐章交错流程。
+
 返回 `2` 时按以下优先级处理：
 
 1. `章节处理/_任务包/task_chNNN_analysis_regenerate.md`：忽略当前不合格MD，重新阅读原文并覆盖生成完整10维章节分析；禁止创建或修改Delta JSON。
