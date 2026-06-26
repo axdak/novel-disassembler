@@ -87,3 +87,46 @@ def test_empty_tag_set_passes_final_schema_validation():
     errors, warnings = validate_exact_story_schema(story, mode="final")
     assert errors == []
     assert not any("标签集 为空" in warning for warning in warnings)
+
+
+def test_event_archive_detail_keys_can_preserve_rich_scene_labels():
+    story = {
+        "介绍": {"标题": "测试", "描述": "测试"},
+        "角色集": [],
+        "事件集": [{
+            "名称": "名场面对峙",
+            "发生地点": "",
+            "参与成员": [],
+            "重量级": 80,
+            "目标事件": [],
+            "分组": "00000010-名场面对峙冲突升级身份揭示",
+            "时间": "0001-01-01T00:00:00",
+            "别名": [],
+            "标签集": ["身份线+冲突升级+爆笑+信息差"],
+            "介绍": "角色围绕身份误会展开对峙。",
+            "详情": {
+                "涉及章节": "0001",
+                "名场面台词（女扮男装误判）": "废话当然是雄的。",
+                "动作链条-压制与围观": "追问身份，然后点穴制住，众人围观。",
+            },
+        }],
+        "地点集": [],
+        "线索集": [],
+        "阵营集": [],
+        "物品集": [],
+        "其他事项集": [],
+    }
+
+    errors, warnings = validate_exact_story_schema(story, mode="process")
+
+    assert errors == []
+    assert warnings == []
+
+
+def test_detail_plain_arrays_remain_invalid_except_encoded_supplementary_tags():
+    story = story_with_tags(supplementary='["人物类型:核心主角"]')
+    story["角色集"][0]["详情"]["动作链条"] = ["出场", "交锋"]
+
+    errors, _ = validate_exact_story_schema(story, mode="process")
+
+    assert any("详情[动作链条]" in error and "string 或 JSON字符串数组" in error for error in errors)

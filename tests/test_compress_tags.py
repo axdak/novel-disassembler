@@ -124,6 +124,24 @@ def test_no_change_when_only_free_tags_under_limit():
     assert json.dumps(item["详情"], ensure_ascii=False, sort_keys=True) == before_detail
 
 
+def test_event_four_dimension_compound_tag_stays_in_tag_set():
+    """事件四维复合标签不带受控前缀，必须留在标签集供界面直读。"""
+    tag = "侠之真义+主题点化+感动+观念冲突"
+    item = _event("佟湘玉点化郭芙蓉", [tag, "哲学对话"])
+    before_detail = json.dumps(item["详情"], ensure_ascii=False, sort_keys=True)
+    compress_item(item, limit=8)
+    assert item["标签集"] == [tag, "哲学对话"]
+    assert SUPPLEMENTARY_TAGS_DETAIL_KEY not in item["详情"]
+    assert json.dumps(item["详情"], ensure_ascii=False, sort_keys=True) == before_detail
+
+
+def test_delta_prompt_requires_event_four_dimension_compound_tag():
+    prompt = Path("prompts/delta_extract.j2").read_text(encoding="utf-8")
+    assert "剧情线主题+叙事功能+爽点/情绪点+冲突悬念类型" in prompt
+    assert "每个事件" in prompt
+    assert "不下沉" in prompt
+
+
 def test_compress_delta_walks_both_buckets():
     delta = {
         "章节": "第001章",
