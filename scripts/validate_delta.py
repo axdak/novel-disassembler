@@ -4,7 +4,7 @@ Delta 入库前校验器。
 
 模式：
   --mode process    逐章入库：字段/类型/详情硬卡；前向引用为 warning。
-  --mode governance 治理补丁：引用错误为 error。
+  --mode governance 治理补丁：引用错误为 error；事件发生地点的未注册细粒度子空间为 warning。
   --mode final      最终修复补丁：引用错误为 error，warning 也更严格。
 
 注意：Delta 允许额外顶层“治理操作”等字段，但 merge_delta.py 只合并 介绍/新增元素/修改元素；治理操作应由 apply_governance_ops.py 或 run_pipeline commit-governance 执行。
@@ -122,7 +122,18 @@ def validate_top(delta: Any, mode: str) -> Tuple[List[str], List[str]]:
     return errors, warnings
 
 
-def issue_ref(errors: List[str], warnings: List[str], mode: str, label: str, field: str, ref: str, target: str, name_sets: Dict[str, Set[str]], alias_maps: Dict[str, Dict[str, str]]) -> None:
+def issue_ref(
+    errors: List[str],
+    warnings: List[str],
+    mode: str,
+    label: str,
+    field: str,
+    ref: str,
+    target: str,
+    name_sets: Dict[str, Set[str]],
+    alias_maps: Dict[str, Dict[str, str]],
+    soft_governance: bool = False,
+) -> None:
     if not isinstance(ref, str) or not ref.strip():
         return
     clean = ref.strip()
@@ -130,7 +141,7 @@ def issue_ref(errors: List[str], warnings: List[str], mode: str, label: str, fie
         return
     if clean in alias_maps.get(target, {}):
         msg = f"{label}.{field} 使用别名引用[{clean}]，建议改为正式名称[{alias_maps[target][clean]}]"
-        if mode == "process":
+        if mode == "process" or (mode == "governance" and soft_governance):
             warnings.append(msg)
         else:
             errors.append(msg)
@@ -138,6 +149,8 @@ def issue_ref(errors: List[str], warnings: List[str], mode: str, label: str, fie
     msg = f"{label}.{field} 引用了不存在的{COLLECTION_TO_TYPE[target]}[{clean}]"
     if mode == "process":
         warnings.append(msg + "；过程阶段允许作为前向引用，但最终前必须补齐或移入详情.待确认信息")
+    elif mode == "governance" and soft_governance:
+        warnings.append(msg + "；治理阶段允许事件发生地点保留细粒度子空间，最终交付前建议收敛为已注册父级地点或正式地点")
     else:
         errors.append(msg)
 
@@ -211,6 +224,95 @@ def validate_evidence_detail(item: Dict[str, Any], label: str, errors: List[str]
             errors.append(f"{label}.详情.{field} 必须是非空字符串，用于Delta、章节分析和治理补丁追溯")
 
 
+def process_issue(warnings: List[str], label: str, message: str) -> None:
+    warnings.append(f"{label} {message}；过程阶段允许先合并，后续由 coerce/normalize/治理收敛")
+
+
+def validate_process_patch_item(
+    collection_key: str,
+    item: Dict[str, Any],
+    label: str,
+    name_sets: Dict[str, Set[str]],
+    alias_maps: Dict[str, Dict[str, str]],
+    errors: List[str],
+    warnings: List[str],
+) -> None:
+    """Process-mode Delta is a mergeable patch, not a complete final element."""
+    valid = VALID_FIELDS[collection_key]
+    for field in item.keys():
+        if field not in valid:
+            errors.append(f"{label} 包含规范外字段[{field}]；非标准信息必须放入详情")
+
+    for field in LIST_FIELDS:
+        if field in item:
+            value = item[field]
+            if not isinstance(value, list):
+                process_issue(warnings, label, f".{field} 建议为数组")
+            else:
+                for i, elem in enumerate(value):
+                    if not isinstance(elem, str):
+                        errors.append(f"{label}.{field}[{i}] 必须是字符串")
+
+    if "标签集" in item:
+        for error in validate_controlled_tags(collection_key, item["标签集"]):
+            errors.append(f"{label}.{error.split('.', 1)[1]}")
+
+    for field in STRING_FIELDS:
+        if field in item and not isinstance(item[field], str):
+            process_issue(warnings, label, f".{field} 建议为字符串")
+
+    if "是否主角" in item and not isinstance(item["是否主角"], bool):
+        process_issue(warnings, label, ".是否主角 建议为布尔值")
+    if "性别" in item and (not isinstance(item["性别"], int) or item["性别"] not in (0, 1, 2)):
+        process_issue(warnings, label, ".性别 建议为整数0/1/2")
+    if "年龄" in item and not isinstance(item["年龄"], int):
+        process_issue(warnings, label, ".年龄 建议为整数")
+    if "重量级" in item and (not isinstance(item["重量级"], int) or item["重量级"] < 0 or item["重量级"] > 100):
+        process_issue(warnings, label, ".重量级 建议为0-100之间整数")
+    if collection_key == "角色集" and "生日" in item and not is_iso_time(item["生日"]):
+        process_issue(warnings, label, f".生日 建议为合法ISO时间，未知可用{BASE_TIME}")
+
+    detail = item.get("详情")
+    if detail is not None:
+        validate_detail_schema(detail, label, name_sets, errors, warnings, mode="delta", alias_maps=alias_maps)
+    else:
+        process_issue(warnings, label, ".详情 缺失，normalize_story_schema.py 将补为空对象")
+
+    if collection_key in TRACEABLE_COLLECTION_KEYS:
+        if not isinstance(detail, dict):
+            return
+        for field in TRACE_DETAIL_FIELDS:
+            value = detail.get(field)
+            if value is None:
+                process_issue(warnings, label, f".详情.{field} 缺失")
+            elif not isinstance(value, str) or not value or normalize_chapter_value(value) != value:
+                process_issue(warnings, label, f".详情.{field} 建议为固定宽度章节序号，例如0001")
+        first = detail.get("首次章节")
+        recent = detail.get("最近章节")
+        if (
+            isinstance(first, str)
+            and isinstance(recent, str)
+            and normalize_chapter_value(first) == first
+            and normalize_chapter_value(recent) == recent
+            and int(first) > int(recent)
+        ):
+            errors.append(f"{label}.详情.首次章节 不得晚于 最近章节")
+
+    if collection_key == "事件集":
+        detail_obj = detail if isinstance(detail, dict) else {}
+        involved = detail_obj.get("涉及章节")
+        if involved is None:
+            process_issue(warnings, label, ".详情.涉及章节 缺失")
+        elif not isinstance(involved, str) or not involved or normalize_involved_chapters(involved) != involved:
+            process_issue(warnings, label, ".详情.涉及章节 建议为固定宽度、升序、去重的字符串")
+        else:
+            expected_time = chapter_time(first_involved_chapter(item))
+            if item.get("时间") != expected_time:
+                process_issue(warnings, label, f".时间 建议等于最小涉及章节对应章节时间[{expected_time}]")
+
+    validate_refs(collection_key, item, label, name_sets, alias_maps, errors, warnings, "process")
+
+
 def existing_event_by_name_or_alias(current: Dict[str, Any], name: str) -> Dict[str, Any] | None:
     for event in current.get("事件集", []) or []:
         if not isinstance(event, dict):
@@ -223,8 +325,9 @@ def existing_event_by_name_or_alias(current: Dict[str, Any], name: str) -> Dict[
 def validate_refs(collection_key: str, item: Dict[str, Any], label: str, name_sets: Dict[str, Set[str]], alias_maps: Dict[str, Dict[str, str]], errors: List[str], warnings: List[str], mode: str) -> None:
     for field, target, kind in STRUCTURAL_REFS[collection_key]:
         value = item.get(field)
+        soft_governance = collection_key == "事件集" and field == "发生地点" and target == "地点集"
         if kind == "scalar":
-            issue_ref(errors, warnings, mode, label, field, value, target, name_sets, alias_maps)
+            issue_ref(errors, warnings, mode, label, field, value, target, name_sets, alias_maps, soft_governance=soft_governance)
         elif kind == "list":
             if isinstance(value, list):
                 for ref in value:
@@ -275,16 +378,22 @@ def validate_elements(current: Dict[str, Any], delta: Dict[str, Any], mode: str)
                 if section == "新增元素":
                     missing = sorted(set(DEFAULTS[collection_key].keys()) - set(item.keys()))
                     if missing:
-                        errors.append(f"{label} 新增元素缺少标准字段: {', '.join(missing)}")
+                        if mode == "process":
+                            process_issue(warnings, label, f"新增元素缺少标准字段: {', '.join(missing)}；normalize 将补齐默认值")
+                        else:
+                            errors.append(f"{label} 新增元素缺少标准字段: {', '.join(missing)}")
                     if name.strip() in exact_name_sets(current).get(collection_key, set()):
                         warnings.append(f"{label} 已存在于当前结构，建议放入修改元素")
                 else:
                     if name.strip() not in existing_name_or_alias.get(collection_key, set()) and mode != "process":
                         warnings.append(f"{label} 在当前结构中不存在，merge后会变成新增元素")
 
-                validate_types(collection_key, item, label, errors, warnings)
-                validate_evidence_detail(item, label, errors)
-                validate_refs(collection_key, item, label, name_sets, alias_maps, errors, warnings, mode)
+                if mode == "process":
+                    validate_process_patch_item(collection_key, item, label, name_sets, alias_maps, errors, warnings)
+                else:
+                    validate_types(collection_key, item, label, errors, warnings)
+                    validate_evidence_detail(item, label, errors)
+                    validate_refs(collection_key, item, label, name_sets, alias_maps, errors, warnings, mode)
                 if mode == "governance" and collection_key == "事件集":
                     existing_event = existing_event_by_name_or_alias(current, name.strip())
                     if existing_event is not None:

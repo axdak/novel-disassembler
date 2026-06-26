@@ -100,7 +100,7 @@ python scripts/run_pipeline.py run <项目目录>
 
 ```bash
 --pattern 自定义章节正则
---preface-mode separate|attach|chapter|drop
+--preface-mode separate|attach|drop
 --sample-lines 500
 --min-matches 2
 ```

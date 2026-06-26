@@ -8,7 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent / "scripts"
 RUNNER = ROOT / "run_pipeline.py"
 sys.path.insert(0, str(ROOT))
 
@@ -166,8 +166,132 @@ def test_manual_governance_reports_remain_separate():
     print("[OK] 手工治理报告保持在按需治理目录")
 
 
+def test_governance_patch_compresses_tags_before_validation():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td)
+        write_json(project / "故事结构_增量.json", empty_story())
+
+        patch = project / "质量治理" / "周期审计" / "correction_001-005.json"
+        write_json(patch, {
+            "章节范围": "001-005",
+            "新增元素": {
+                "角色集": [
+                    {
+                        "名称": "客栈掌柜",
+                        "是否主角": False,
+                        "性别": 2,
+                        "年龄": 0,
+                        "生日": "0001-01-01T00:00:00",
+                        "所属阵营": [],
+                        "关系": [],
+                        "分组": "路人",
+                        "别名": [],
+                        "标签集": ["人物类型:掌柜", "客栈"],
+                        "介绍": "客栈掌柜。",
+                        "详情": {
+                            "首次章节": "0001",
+                            "最近章节": "0001",
+                            "提取理由": "测试治理补丁标签压缩。",
+                        },
+                    }
+                ],
+                "事件集": [],
+                "地点集": [],
+                "线索集": [],
+                "阵营集": [],
+                "物品集": [],
+                "其他事项集": [],
+            },
+            "修改元素": empty_delta(1)["修改元素"],
+        })
+
+        rc = commit_governance(project, str(patch))
+
+        assert rc == 0
+        patched = json.loads(patch.read_text(encoding="utf-8"))
+        character = patched["新增元素"]["角色集"][0]
+        assert character["标签集"] == ["客栈"]
+        assert json.loads(character["详情"]["补充标签"]) == ["人物类型:掌柜"]
+        assert list((project / "质量治理" / "周期审计").glob("compress_governance_*.json"))
+
+    print("[OK] 治理补丁校验前执行标签压缩")
+
+
+def test_chapter_delta_repairs_llm_json_before_validation():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        chapter = write_chapter_source(project, 1)
+        base = chapter.stem
+        (project / "章节处理").mkdir(parents=True, exist_ok=True)
+        (project / "章节处理" / chapter.name).write_text("# 第001章分析\n", encoding="utf-8")
+        malformed_delta = """```json
+{
+  '章节': '第001章',
+  '新增元素': {
+    '角色集': [], '事件集': [], '地点集': [], '线索集': [],
+    '阵营集': [], '物品集': [], '其他事项集': [],
+  },
+  '修改元素': {
+    '角色集': [], '事件集': [], '地点集': [], '线索集': [],
+    '阵营集': [], '物品集': [], '其他事项集': [],
+  },
+}
+```
+"""
+        (project / "章节处理" / f"{base}.json").write_text(malformed_delta, encoding="utf-8")
+
+        rc = cmd_run(project)
+
+        assert rc == 0
+        repaired = json.loads((project / "章节处理" / f"{base}.json").read_text(encoding="utf-8"))
+        assert repaired["章节"] == "第001章"
+        assert list((project / "质量治理" / "delta校验").glob("repair_json_ch001.json"))
+
+    print("[OK] 章节 Delta 校验前修复 LLM JSON 语法")
+
+
+def test_governance_patch_repairs_llm_json_before_validation():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        patch = project / "manual_correction.json"
+        patch.write_text(
+            """```json
+{
+  '章节': '手工治理',
+  '治理类型': 'no_change',
+  '质量说明': '手工治理回归检查，无需修改。',
+  '证据范围': ['第001章',],
+  '新增元素': {
+    '角色集': [], '事件集': [], '地点集': [], '线索集': [],
+    '阵营集': [], '物品集': [], '其他事项集': [],
+  },
+  '修改元素': {
+    '角色集': [], '事件集': [], '地点集': [], '线索集': [],
+    '阵营集': [], '物品集': [], '其他事项集': [],
+  },
+}
+```
+""",
+            encoding="utf-8",
+        )
+
+        rc = commit_governance(project, str(patch))
+
+        assert rc == 0
+        repaired = json.loads(patch.read_text(encoding="utf-8"))
+        assert repaired["章节"] == "手工治理"
+        assert list((project / "质量治理" / "按需治理").glob("repair_json_governance_*.json"))
+
+    print("[OK] 治理补丁校验前修复 LLM JSON 语法")
+
+
 if __name__ == "__main__":
     test_audit_pack_cli_creates_review_package()
     test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch()
     test_manual_governance_reports_remain_separate()
+    test_governance_patch_compresses_tags_before_validation()
+    test_chapter_delta_repairs_llm_json_before_validation()
+    test_governance_patch_repairs_llm_json_before_validation()
     print("\n全部测试通过 [PASS]")

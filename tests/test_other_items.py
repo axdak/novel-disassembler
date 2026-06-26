@@ -7,7 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
 sys.path.insert(0, HERE)
 
 from analysis_context_pack import summarize_story_structure

@@ -6,7 +6,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(ROOT))
 
 from run_pipeline import artifact_paths, cmd_run

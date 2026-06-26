@@ -5,16 +5,21 @@ import argparse, json, os, re, sys, zipfile, xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Tuple, Optional
 
-CHAPTER_PATTERNS = [
+# 强特征模式：含有“第/章/卷/序/尾声/番外”等明确标记，误报率低。
+CHAPTER_PATTERNS_STRONG = [
     r'^[\s]*第[一二三四五六七八九十百千万零〇\d]+[章节回卷集部篇][\s　]*.*',
     r'^[\s]*[Cc]hapter[\s]+\d+.*',
-    r'^[\s]*\d{1,5}[\s\.、．]+.*',
     r'^[\s]*[卷回集部篇][一二三四五六七八九十百千万零〇\d]+.*',
     r'^[\s]*(?:序[章幕言]?|楔子|引[子言篇]|开篇)[\s　]*.*',
     r'^[\s]*(?:尾声|终[章篇]|结语|后记|结尾)[\s　]*.*',
     r'^[\s]*(?:番外|外传|特别[篇章]|附录|插话)[\s　\d]*.*',
+]
+# 弱特征模式：只在强模式全部失败时启用，避免“1. xxx”“【批注】”等行误切。
+CHAPTER_PATTERNS_WEAK = [
+    r'^[\s]*\d{1,5}[\s\.、．]+.*',
     r'^[\s]*【[^】]+】.*',
 ]
+CHAPTER_PATTERNS = CHAPTER_PATTERNS_STRONG + CHAPTER_PATTERNS_WEAK
 CN_NUM_MAP={'零':0,'〇':0,'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,'十':10,'百':100,'千':1000,'万':10000}
 ORDER_PATTERNS=[r'第(\d+)',r'[Cc]hapter\s+(\d+)',r'^\s*(\d{1,5})',r'第([一二三四五六七八九十百千万零〇]+)']
 
@@ -51,10 +56,25 @@ def read_file(path:str)->str:
 
 def detect_pattern(text:str, sample_lines:int=0, min_matches:int=2)->Tuple[Optional[str],List[str]]:
     # sample_lines<=0 表示扫全文；保留参数仅为向后兼容。
+    # 两阶段：先在强特征模式里选命中数最多的；强模式全失败再尝试弱模式。
+    # 避免“1. xxx”“【批注】”等行抢在“第N章”之前匹配。
     lines=text.splitlines() if sample_lines<=0 else text.splitlines()[:sample_lines]
-    for pat in CHAPTER_PATTERNS:
-        matches=[line.strip() for line in lines if line.strip() and re.match(pat,line.strip())]
-        if len(matches)>=min_matches: return pat,matches
+    stripped=[line.strip() for line in lines if line.strip()]
+    def _best(pats:List[str])->Tuple[Optional[str],List[str]]:
+        bp:Optional[str]=None; bm:List[str]=[]
+        for pat in pats:
+            matches=[s for s in stripped if re.match(pat,s)]
+            if len(matches)>=min_matches and len(matches)>len(bm):
+                bp,bm=pat,matches
+        return bp,bm
+    pat,matches=_best(CHAPTER_PATTERNS_STRONG)
+    if pat:
+        print(f"采用强特征模式: {pat} （命中 {len(matches)}）")
+        return pat,matches
+    pat,matches=_best(CHAPTER_PATTERNS_WEAK)
+    if pat:
+        print(f"WARNING: 仅匹配到弱特征模式: {pat} （命中 {len(matches)}），可能存在误切。")
+        return pat,matches
     return None,[]
 
 def extract_order(title:str)->int:
@@ -106,21 +126,15 @@ def split_novel(input_file:str, output_dir:str, pattern:str='', preface_mode:str
     if pre and ''.join(pre).strip():
         if preface_mode=='attach' and chapters:
             chapters[0]['content']='\n'.join(pre).strip()+'\n\n'+chapters[0]['content']
-        elif preface_mode=='chapter':
-            chapters.insert(0,{'title':'前言','content':'\n'.join(pre).strip(),'is_preface':True})
         elif preface_mode=='separate':
             (out/'_前言.md').write_text('# 前言\n\n'+'\n'.join(pre).strip(),encoding='utf-8')
         elif preface_mode=='drop':
             pass
     index=[]; seq=1
     for i,ch in enumerate(chapters,1):
-        is_preface=bool(ch.get('is_preface'))
-        if is_preface and preface_mode=='chapter':
-            filename=f"第{seq:03d}章_前言.md"
-        else:
-            filename=f"第{seq:03d}章_{safe_name(ch['title'])}.md"
+        filename=f"第{seq:03d}章_{safe_name(ch['title'])}.md"
         (out/filename).write_text(f"# {ch['title']}\n\n{ch['content']}",encoding='utf-8')
-        index.append({"seq":seq,"source_order":extract_order(ch['title']) or i,"source_title":ch['title'],"normalized_title":normalize_title(ch['title']),"filename":filename,"title":ch['title'],"is_preface":is_preface})
+        index.append({"seq":seq,"source_order":extract_order(ch['title']) or i,"source_title":ch['title'],"normalized_title":normalize_title(ch['title']),"filename":filename,"title":ch['title'],"is_preface":False})
         seq+=1
     write_index(out,index,input_file,pat,preface_mode)
     print(f"拆分完成: {len(index)} 个章节文件。")
@@ -130,7 +144,7 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('input_file'); ap.add_argument('output_dir')
     ap.add_argument('--pattern',default='')
-    ap.add_argument('--preface-mode',choices=['separate','attach','chapter','drop'],default='separate')
+    ap.add_argument('--preface-mode',choices=['separate','attach','drop'],default='separate')
     ap.add_argument('--sample-lines',type=int,default=0,help='0=扫全文（默认）；>0=只看前N行')
     ap.add_argument('--min-matches',type=int,default=2)
     args=ap.parse_args()

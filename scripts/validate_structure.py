@@ -4,7 +4,7 @@
 
 三档模式：
   --mode process    逐章过程库：卡结构/字段/类型；前向引用、数量不足为 warning。
-  --mode governance 周期/按需治理后：引用错误为 error；数量不足为 warning。
+  --mode governance 周期/按需治理后：引用错误为 error；事件发生地点的未注册细粒度子空间为 warning；数量不足为 warning。
   --mode final      最终交付：强 Schema、引用、最低数量、介绍完整性均为 error。
 
 兼容：

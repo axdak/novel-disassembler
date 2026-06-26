@@ -200,6 +200,7 @@ def _issue_ref(
     target_collection: str,
     name_sets: Dict[str, Set[str]],
     alias_maps: Optional[Dict[str, Dict[str, str]]] = None,
+    soft_governance: bool = False,
 ) -> None:
     if ref in (None, ""):
         return
@@ -222,6 +223,8 @@ def _issue_ref(
     msg = f"{label}.{field} 引用了不存在的{COLLECTION_TO_TYPE[target_collection]}[{clean}]"
     if mode in ("process", "delta"):
         warnings.append(msg + "；过程阶段可能是前向引用，最终交付前必须补齐或移入详情.待确认信息")
+    elif mode == "governance" and soft_governance:
+        warnings.append(msg + "；治理阶段允许事件发生地点保留细粒度子空间，最终交付前建议收敛为已注册父级地点或正式地点")
     else:
         errors.append(msg)
 
@@ -370,8 +373,9 @@ def validate_item_schema(
     # 结构引用
     for field, target_collection, kind in STRUCTURAL_REF_FIELDS[collection_key]:
         value = item.get(field)
+        soft_governance = collection_key == "事件集" and field == "发生地点" and target_collection == "地点集"
         if kind == "scalar":
-            _issue_ref(errors, warnings, mode, label, field, value, target_collection, name_sets, alias_maps)
+            _issue_ref(errors, warnings, mode, label, field, value, target_collection, name_sets, alias_maps, soft_governance=soft_governance)
         elif kind == "list":
             if isinstance(value, list):
                 for ref in value:
@@ -443,7 +447,7 @@ def validate_exact_story_schema(data: Any, *, mode: str = "process", enforce_cou
 
     mode:
       - process: 逐章过程库。硬卡格式/字段/类型；前向引用、数量不足、内容深度不足为 warning。
-      - governance: 治理后阶段。引用错误升级为 error；数量不足仍为 warning。
+      - governance: 治理后阶段。引用错误升级为 error；事件发生地点的未注册细粒度子空间保留为 warning；数量不足仍为 warning。
       - final: 最终交付。引用、数量、介绍等核心质量要求均为 error。
     """
     if mode not in {"process", "governance", "final", "delta"}:

@@ -71,7 +71,7 @@ python scripts/validate_structure.py --chapter-check <故事结构_增量.json> 
 
 校验档位：
 - `--mode process`: 每章日常提交。
-- `--mode governance`: 周期治理后，强校验引用，规范标签。
+- `--mode governance`: 周期治理后，强校验引用，规范标签；事件 `发生地点` 的未注册细粒度子空间仅作为 warning，避免治理被临时方位词卡住。
 - `--mode final`: 最终交付前的最严格卡口。
 
 ## 故事结构质量保障原则

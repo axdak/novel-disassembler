@@ -44,10 +44,10 @@
 
 | 文件 | 内容 |
 |------|------|
-| `章节处理/第NNN章_标题.md` | 章节7/8维度分析 |
+| `章节处理/第NNN章_标题.md` | 章节10维度分析 |
 | `章节处理/第NNN章_标题.json` | 本章Delta |
-| `质量治理/delta校验/第NNN章_标题.txt` | 入库前校验报告 |
-| `质量治理/章节校验/第NNN章_标题.txt` | 合并后全量过程库校验报告，附本切片触碰元素统计 |
+| `质量治理/delta校验/第NNN章_标题.json` | 入库前校验报告 |
+| `质量治理/章节校验/第NNN章_标题.json` | 合并后全量过程库校验报告，附本切片触碰元素统计 |
 | `故事结构版本/story_before_chNNN.json` | 合并前快照 |
 | `故事结构版本/story_after_chNNN.json` | 合并通过后快照 |
 
@@ -71,8 +71,8 @@
 恢复时先运行：
 
 ```bash
-python progress_manager.py resume <项目目录>
-python progress_manager.py reconcile <项目目录>
+python <skill_path>/scripts/progress_manager.py resume <项目目录>
+python <skill_path>/scripts/progress_manager.py reconcile <项目目录>
 ```
 
 然后按以下规则判断：
@@ -125,9 +125,9 @@ python progress_manager.py reconcile <项目目录>
 审计Delta也必须走：
 
 ```bash
-python validate_delta.py <故事结构_增量.json> correction_001-005.json
-python merge_delta.py <故事结构_增量.json> correction_001-005.json
-python validate_structure.py --chapter-check <故事结构_增量.json> correction_001-005.json
+python <skill_path>/scripts/validate_delta.py <故事结构_增量.json> correction_001-005.json
+python <skill_path>/scripts/merge_delta.py <故事结构_增量.json> correction_001-005.json
+python <skill_path>/scripts/validate_structure.py --chapter-check <故事结构_增量.json> correction_001-005.json
 ```
 
 ## 最坏损失评估

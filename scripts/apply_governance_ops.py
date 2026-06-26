@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """执行治理补丁中的确定性操作：合并、重命名、替换引用、删除、降级、设置字段。"""
 from __future__ import annotations
-import argparse, copy, json, os, shutil, sys, datetime as dt
+import argparse, copy, json, os, shutil, sys, datetime as dt, tempfile
 from typing import Any, Dict, List, Set
 from story_schema_rules import COLLECTION_KEYS, TYPE_TO_COLLECTION, dump_supplementary_tags, parse_supplementary_tags
 
@@ -9,7 +9,17 @@ from story_schema_rules import COLLECTION_KEYS, TYPE_TO_COLLECTION, dump_supplem
 def load(p):
     with open(p,'r',encoding='utf-8') as f: return json.load(f)
 def save(p,d):
-    with open(p,'w',encoding='utf-8') as f: json.dump(d,f,ensure_ascii=False,indent=2)
+    directory=os.path.dirname(os.path.abspath(p))
+    os.makedirs(directory,exist_ok=True)
+    fd,tmp=tempfile.mkstemp(prefix=f'.{os.path.basename(p)}.',suffix='.tmp',dir=directory)
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as f:
+            json.dump(d,f,ensure_ascii=False,indent=2); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp,p)
+    except Exception:
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
+        raise
 def names(item):
     s=set()
     if isinstance(item.get('名称'),str): s.add(item['名称'])

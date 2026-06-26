@@ -146,6 +146,20 @@ def run_cmd(
     return returncode
 
 
+def repair_llm_json(path: Path, report_path: Path, backup: bool = False) -> int:
+    """修复/格式化 LLM 产出的 JSON 语法，保证后续脚本读取严格 JSON。"""
+    cmd = [
+        sys.executable,
+        str(script_path("repair_llm_json.py")),
+        str(path),
+        "--report",
+        str(report_path),
+    ]
+    if backup:
+        cmd.append("--backup")
+    return run_cmd(cmd)
+
+
 def init_dirs(project_dir: Path) -> None:
     for d in REQUIRED_DIRS:
         (project_dir / d).mkdir(parents=True, exist_ok=True)
@@ -353,6 +367,18 @@ def replay_one_delta(project_dir: Path, seq: int) -> int:
     p = artifact_paths(project_dir, chapter)
     if not p["delta"].is_file():
         print(f"重放失败: 缺少第{seq:03d}章Delta: {p['delta']}")
+        return 1
+
+    repair_json_report = project_dir / "质量治理" / "delta校验" / f"repair_json_ch{seq:03d}.json"
+    rc = repair_llm_json(p["delta"], repair_json_report)
+    if rc != 0:
+        print(f"重放失败: 第{seq:03d}章 LLM JSON 语法修复失败，见: {repair_json_report}")
+        return 1
+
+    coerce_delta_report = project_dir / "质量治理" / "delta校验" / f"coerce_ch{seq:03d}.json"
+    rc = run_cmd([sys.executable, str(script_path("coerce_delta.py")), str(p["delta"]), "--report", str(coerce_delta_report)])
+    if rc != 0:
+        print(f"重放失败: 第{seq:03d}章 Delta 机械纠错失败，见: {coerce_delta_report}")
         return 1
 
     compress_delta_report = project_dir / "质量治理" / "delta校验" / f"compress_ch{seq:03d}.json"
@@ -620,6 +646,9 @@ def write_audit_pack(project_dir: Path, start: int, end: int, force: bool = Fals
             "delta_excerpt": read_excerpt(p["delta"]),
         })
 
+    taxonomy_path = Path(__file__).resolve().parent.parent / "references" / "narrative_taxonomy.json"
+    taxonomy_json = taxonomy_path.read_text(encoding="utf-8", errors="ignore") if taxonomy_path.is_file() else ""
+
     content = render_prompt(
         "audit.j2",
         start=start,
@@ -632,6 +661,7 @@ def write_audit_pack(project_dir: Path, start: int, end: int, force: bool = Fals
         relevant_details=relevant_details,
         previous_correction=get_previous_correction(project_dir, start),
         chapters=chapters,
+        taxonomy_json=taxonomy_json,
     )
 
     paths["pack"].parent.mkdir(parents=True, exist_ok=True)
@@ -853,7 +883,26 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
         print("已交接：等待基于章节分析的Delta JSON。")
         return 2
 
-    # 入库前先做确定性标签压缩，把受控前缀标签和超限自由标签搬到 详情.补充标签，
+    # 入库前先修复 LLM JSON 语法：Markdown 代码块、单引号、尾逗号等先转成严格 JSON，
+    # 避免后续 coerce/validate 因 json.load 直接失败。
+    repair_json_report = project_dir / "质量治理" / "delta校验" / f"repair_json_ch{seq:03d}.json"
+    rc = repair_llm_json(p["delta"], repair_json_report)
+    if rc != 0:
+        print(f"Delta LLM JSON 语法修复失败，见: {repair_json_report}")
+        write_repair_pack(project_dir, chapter, "repair_llm_json.py失败", [repair_json_report])
+        return 1
+
+    # 入库前先做机械纠错：把 LLM 写错的类型/格式（bool/int、数组↔标量、章节号宽度、
+    # 顶层追溯字段位置等）确定性地修好。这一步不需要 LLM 介入，能把大半 repair 循环
+    # 提前消解。失败（理论上只在 JSON 损坏时）才落 repair 包。
+    coerce_delta_report = project_dir / "质量治理" / "delta校验" / f"coerce_ch{seq:03d}.json"
+    rc = run_cmd([sys.executable, str(script_path("coerce_delta.py")), str(p["delta"]), "--report", str(coerce_delta_report)])
+    if rc != 0:
+        print(f"Delta 机械纠错失败，见: {coerce_delta_report}")
+        write_repair_pack(project_dir, chapter, "coerce_delta.py失败", [coerce_delta_report])
+        return 1
+
+    # 入库前再做确定性标签压缩，把受控前缀标签和超限自由标签搬到 详情.补充标签，
     # 让原本因 taxonomy 失配进 repair 循环的报错根本不发生。
     compress_delta_report = project_dir / "质量治理" / "delta校验" / f"compress_ch{seq:03d}.json"
     rc = run_cmd([sys.executable, str(script_path("compress_tags.py")), "--delta", str(p["delta"]), "--report", str(compress_delta_report)])
@@ -1017,6 +1066,16 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
     report_delta = governance_dir / f"validate_delta_governance_{ts}.txt"
     report_schema = governance_dir / f"validate_schema_governance_{ts}.txt"
     shutil.copy2(story, before)
+    report_repair_json = governance_dir / f"repair_json_governance_{ts}.json"
+    rc = repair_llm_json(patch, report_repair_json, backup=True)
+    if rc != 0:
+        print(f"治理补丁 LLM JSON 语法修复失败: {report_repair_json}")
+        return 1
+    report_compress = governance_dir / f"compress_governance_{ts}.json"
+    rc = run_cmd([sys.executable, str(script_path("compress_tags.py")), "--delta", str(patch), "--report", str(report_compress)])
+    if rc != 0:
+        print(f"治理补丁标签压缩失败: {report_compress}")
+        return 1
     rc = run_cmd([sys.executable, str(script_path("validate_delta.py")), "--mode", "governance", str(story), str(patch)], report_delta)
     if rc != 0:
         print(f"治理补丁Delta校验失败: {report_delta}")
@@ -1391,7 +1450,7 @@ def main() -> int:
     p_split.add_argument("project_dir")
     p_split.add_argument("source_file")
     p_split.add_argument("--pattern", default="")
-    p_split.add_argument("--preface-mode", choices=["separate", "attach", "chapter", "drop"], default="")
+    p_split.add_argument("--preface-mode", choices=["separate", "attach", "drop"], default="")
 
     p_prepare = sub.add_parser("prepare-chapter", help="根据当前产物状态生成章节分析或Delta提取任务包")
     p_prepare.add_argument("project_dir")
@@ -1437,7 +1496,7 @@ def main() -> int:
 
     p_pack = sub.add_parser("analysis-pack", help="生成全书/局部分析任务包")
     p_pack.add_argument("project_dir")
-    p_pack.add_argument("--task", choices=["summary", "characters", "plot", "style", "visual_assets", "report", "custom", "worldview", "plotlines", "outline", "detailed_outline", "chapter_structure", "narrative_structure"], required=True)
+    p_pack.add_argument("--task", choices=["summary", "characters", "plot", "style", "visual_assets", "report", "custom", "worldview", "plotlines", "outline", "detailed_outline", "chapter_structure", "narrative_structure", "settings"], required=True)
     p_pack.add_argument("--chapters", default="all")
     p_pack.add_argument("--targets", nargs="*", default=[])
     p_pack.add_argument("--question", default="")

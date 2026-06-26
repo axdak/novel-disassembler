@@ -82,15 +82,35 @@ final-pack → 模型根据任务包修改草稿 → commit-final-draft
 
 ## 资源清单
 
-### scripts/
-- `split_chapters.py`：章节拆分脚本，自动检测章节模式并拆分，支持 txt/docx。
-- `merge_delta.py`：Delta合并脚本，将单章Delta字段级深度合并到增量JSON，只增不删，支持别名匹配。
-- `validate_delta.py`：Delta入库前质量校验脚本，检查schema、字段、类型、重复、交叉引用和新增/修改语义。
-- `validate_structure.py`：结构验证脚本，支持全量验证、`--strict`、`--clean`、`--chapter-check`；其中 `--chapter-check` 是每切片合并后的全量过程库检查，并附带本切片触碰元素统计。
+### scripts/（共 16 个）
+
+**主控 & 进度**
+- `run_pipeline.py`：主控器，推进章节、生成任务包、提交章节/治理/最终交付；不直接调用大模型。
 - `progress_manager.py`：进度管理脚本，初始化、查询、更新、断点恢复、摘要生成。
-- `run_pipeline.py`：主控器，推进章节、生成任务包、提交章节/治理/最终交付。
-- `test_merge_delta.py`：merge_delta 深度合并行为测试。
-- `test_validate_delta.py`：validate_delta 与 chapter-check 测试。
+
+**步骤 1：章节拆分**
+- `split_chapters.py`：章节拆分脚本，自动检测章节模式并拆分，支持 txt/docx。
+
+**步骤 2：逐章提取 & 合并**
+- `repair_llm_json.py`：修复 LLM 生成的 JSON 语法（Markdown 代码块、单引号、尾逗号等），输出严格 JSON。
+- `coerce_delta.py`：Delta 入库前机械纠错层，确定性类型/格式修复（性别映射、章节序号补零、时间推导等），减少 repair 循环。
+- `compress_tags.py`：标签自动压缩，把带受控前缀的标签和超限自由标签降级到 `详情.补充标签`。
+- `validate_delta.py`：Delta 入库前质量校验脚本，检查 schema、字段、类型、重复、交叉引用和新增/修改语义；支持 `--mode process/governance/final`。
+- `merge_delta.py`：Delta 合并脚本，将单章 Delta 字段级深度合并到增量 JSON，只增不删，支持别名匹配。
+- `validate_structure.py`：结构验证脚本，支持 `--mode process/governance/final` 三档模式、`--strict`（等价 `--mode final`）、`--chapter-check`；其中 `--chapter-check` 是每切片合并后的全量过程库检查，并附带本切片触碰元素统计。
+- `normalize_story_schema.py`：保全式故事结构规范化，迁移非标准字段到详情、补齐默认值、别名规范化、无效引用隔离；不删信息。
+
+**治理 & 审计**
+- `apply_governance_ops.py`：执行治理补丁中的确定性操作：合并元素、重命名、替换引用、标签治理、降级、删除、设置字段。
+- `diff_structure.py`：生成故事结构 before/after 差异报告（新增/删除/修改元素对比）。
+
+**步骤 3：全书分析**
+- `analysis_context_pack.py`：全书/局部分析上下文打包器，支持按章节范围/目标元素分包、reduce 归约，驱动全部分析任务类型。
+
+**时间线 & 规则**
+- `chronology.py`：章节序号、章节时间和事件分组的统一规则（库模块，被多个脚本引用）。
+- `story_schema_rules.py`：故事结构 JSON Schema 常量与校验规则（库模块，被校验器和规范化脚本引用）。
+- `migrate_chronology.py`：一次性迁移工具，将既有故事结构迁移到章节时间、紧凑追溯字段和事件顺序规范。
 
 ### references/
 - `process_overview.md`：流程总览（核心决策、Agent分工、流程表、单章流程）。

@@ -11,7 +11,7 @@ from pathlib import Path
 from story_schema_rules import NARRATIVE_TAXONOMY, validate_controlled_tags
 
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent / "scripts"
 DELTA_VALIDATOR = SCRIPT_DIR / "validate_delta.py"
 
 

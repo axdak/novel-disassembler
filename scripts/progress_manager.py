@@ -594,7 +594,7 @@ def get_resume_info(project_dir):
 
         if next_report:
             print(f"\n下一建议报告: {next_report} - {STEP3_REPORTS[next_report]}")
-            print("操作: python run_pipeline.py analysis-pack <项目目录> --task {next_report} --chapters all")
+            print(f"操作: python run_pipeline.py analysis-pack <项目目录> --task {next_report} --chapters all")
         else:
             print(f"\n所有基准报告已固化")
     elif current_step == "4":
