@@ -14,6 +14,7 @@ from chronology import (
     assign_event_group_orders,
     chapter_time,
     is_iso_time,
+    is_semantic_event_group_name,
     normalize_involved_chapters,
 )
 from merge_delta import deep_merge_item, merge_delta
@@ -100,7 +101,7 @@ def test_merge_inserts_historical_event_by_involved_chapter():
             merged = json.load(handle)
 
         assert [item["名称"] for item in merged["事件集"]] == ["第001章事件", "第043-045章聚合事件", "第050章事件"]
-        assert merged["事件集"][1]["分组"] == "0020-成人仪式"
+        assert merged["事件集"][1]["分组"] == "00000020-成人仪式"
     print("[OK] 历史聚合事件按章节位置插入")
 
 
@@ -112,7 +113,7 @@ def test_group_order_uses_plot_segment_rank_without_reordering_group_members():
     ]
     assign_event_group_orders(events)
     assert [item["名称"] for item in events] == ["第050章事件", "第029章事件", "第043章事件"]
-    assert {item["分组"] for item in events} == {"0010-成人仪式"}
+    assert {item["分组"] for item in events} == {"00000010-成人仪式"}
     print("[OK] 剧情段序号分组且不改事件原顺序")
 
 
@@ -129,7 +130,7 @@ def test_migration_drops_legacy_trace_and_stably_orders_events():
     ]
     migrated, _ = migrate_story(story)
     assert [item["名称"] for item in migrated["事件集"]] == ["成人仪式", "后续事件"]
-    assert migrated["事件集"][0]["分组"] == "0010-成人仪式"
+    assert migrated["事件集"][0]["分组"] == "00000010-成人仪式"
     assert migrated["角色集"][0]["生日"] == BASE_TIME
     assert migrated["角色集"][0]["详情"]["首次章节"] == "0001"
     assert migrated["角色集"][0]["详情"]["最近章节"] == "0008"
@@ -145,7 +146,7 @@ def test_structure_validator_rejects_event_order_and_group_rank_drift():
     ]
     errors, _ = validate_exact_story_schema(story, mode="process")
     assert any("早于前一事件" in error for error in errors), errors
-    assert any("段号应为0010" in error for error in errors), errors
+    assert any("段号应为00000010" in error for error in errors), errors
     print("[OK] 结构校验器拒绝事件乱序和错误剧情段号")
 
 
@@ -181,9 +182,9 @@ def test_group_order_uses_plot_segment_rank_not_chapter_number():
     ]
     assign_event_group_orders(events)
     assert [item["分组"] for item in events] == [
-        "0010-退婚事件",
-        "0010-退婚事件",
-        "0020-历练事件",
+        "00000010-退婚事件",
+        "00000010-退婚事件",
+        "00000020-历练事件",
     ]
     print("[OK] 连续剧情段按段号分组，不按章节号拆分")
 
@@ -198,9 +199,9 @@ def test_group_order_rebuild_preserves_free_plot_segment_detail():
     events[0]["详情"]["关联线索"] = ["线索:资金缺口"]
     assign_event_group_orders(events)
     assert [item["分组"] for item in events] == [
-        "0010-坊市筹资",
-        "0020-历练事件",
-        "0030-拍卖会事件",
+        "00000010-坊市筹资",
+        "00000020-历练事件",
+        "00000030-拍卖会事件",
     ]
     assert events[0]["详情"]["剧情段"] == "萧炎-坊市-药材出售-资源积累"
     assert events[0]["详情"]["关联线索"] == ["线索:资金缺口"]
@@ -215,13 +216,13 @@ def test_numeric_only_group_uses_plot_segment_detail_instead_of_number_suffix():
     for item in events:
         item["详情"]["剧情段"] = "坊市筹资"
     assign_event_group_orders(events)
-    assert [item["分组"] for item in events] == ["0010-坊市筹资", "0010-坊市筹资"]
+    assert [item["分组"] for item in events] == ["00000010-坊市筹资", "00000010-坊市筹资"]
     print("[OK] 纯编号分组改用剧情段信息")
 
 
 def test_structure_validator_rejects_number_only_plot_segment_name():
     story = empty_story()
-    story["事件集"] = [event("坊市筹资", "0003", "0010-0001")]
+    story["事件集"] = [event("坊市筹资", "0003", "00000010-0001")]
     errors, _ = validate_exact_story_schema(story, mode="process")
     assert any("不能是纯编号" in error for error in errors), errors
     print("[OK] 结构校验拒绝编号套编号分组")
@@ -234,14 +235,47 @@ def test_assigner_does_not_launder_number_only_group_into_ranked_group():
     print("[OK] 排序器不再把纯编号伪装成剧情分组")
 
 
+def test_group_order_uses_eight_digit_rank_and_keeps_compact_semantic_name():
+    events = [
+        event("退婚冲突", "0003", "退婚尊严线冲突爆发羞辱反击身份尊严"),
+        event("退婚反击", "0004", "退婚尊严线冲突爆发羞辱反击身份尊严"),
+    ]
+    assign_event_group_orders(events)
+    assert [item["分组"] for item in events] == [
+        "00000010-退婚尊严线冲突爆发羞辱反击身份尊严",
+        "00000010-退婚尊严线冲突爆发羞辱反击身份尊严",
+    ]
+    assert is_semantic_event_group_name("退婚尊严线冲突爆发羞辱反击身份尊严")
+    print("[OK] 分组使用8位段号和40字内复合短名")
+
+
+def test_structure_validator_rejects_long_plus_event_group_format():
+    story = empty_story()
+    story["事件集"] = [
+        event("退婚冲突", "0003", "00000010-退婚事件+情感尊严线+冲突爆发+羞辱反击+身份与尊严")
+    ]
+    errors, _ = validate_exact_story_schema(story, mode="process")
+    assert any("40字以内" in error for error in errors), errors
+    assert any("不得使用+" in error for error in errors), errors
+    print("[OK] 结构校验拒绝长格式+分隔事件分组")
+
+
+def test_structure_validator_rejects_short_rank_width():
+    story = empty_story()
+    story["事件集"] = [event("退婚冲突", "0003", "0010-退婚尊严线冲突爆发羞辱反击身份尊严")]
+    errors, _ = validate_exact_story_schema(story, mode="process")
+    assert any("段号必须至少8位" in error for error in errors), errors
+    print("[OK] 结构校验拒绝4位事件分组段号")
+
+
 def test_merge_assigns_new_segment_rank_and_governance_reorders_after_insertion():
     with tempfile.TemporaryDirectory() as directory:
         story_path = os.path.join(directory, "story.json")
         delta_path = os.path.join(directory, "delta.json")
         story = empty_story()
         story["事件集"] = [
-            event("退婚冲突", "0003", "0010-退婚事件"),
-            event("拍卖会竞价", "0018", "0020-拍卖会事件"),
+            event("退婚冲突", "0003", "00000010-退婚事件"),
+            event("拍卖会竞价", "0018", "00000020-拍卖会事件"),
         ]
         write_json(story_path, story)
         write_json(delta_path, {
@@ -253,9 +287,9 @@ def test_merge_assigns_new_segment_rank_and_governance_reorders_after_insertion(
         merged = json.loads(open(story_path, "r", encoding="utf-8").read())
         assert [item["名称"] for item in merged["事件集"]] == ["退婚冲突", "魔兽山脉历练", "拍卖会竞价"]
         assert [item["分组"] for item in merged["事件集"]] == [
-            "0010-退婚事件",
-            "0020-历练事件",
-            "0030-拍卖会事件",
+            "00000010-退婚事件",
+            "00000020-历练事件",
+            "00000030-拍卖会事件",
         ]
     print("[OK] 治理插入历史事件后按剧情段顺序全量重排段号")
 
@@ -269,9 +303,9 @@ def test_migration_splits_noncontiguous_legacy_group_runs():
     ]
     migrated, _ = migrate_story(story)
     assert [item["分组"] for item in migrated["事件集"]] == [
-        "0010-经济线",
-        "0020-历练事件",
-        "0030-经济线续2",
+        "00000010-经济线",
+        "00000020-历练事件",
+        "00000030-经济线续2",
     ]
     print("[OK] 存量迁移拆分非连续旧分组")
 
@@ -279,9 +313,9 @@ def test_migration_splits_noncontiguous_legacy_group_runs():
 def test_structure_validator_rejects_noncontiguous_reuse_of_plot_segment_name():
     story = empty_story()
     story["事件集"] = [
-        event("坊市筹资", "0003", "0010-坊市筹资"),
-        event("魔兽山脉历练", "0006", "0020-历练事件"),
-        event("拍卖会竞价", "0018", "0030-坊市筹资"),
+        event("坊市筹资", "0003", "00000010-坊市筹资"),
+        event("魔兽山脉历练", "0006", "00000020-历练事件"),
+        event("拍卖会竞价", "0018", "00000030-坊市筹资"),
     ]
     errors, _ = validate_exact_story_schema(story, mode="process")
     assert any("非连续复用" in error for error in errors), errors
@@ -302,6 +336,9 @@ if __name__ == "__main__":
     test_numeric_only_group_uses_plot_segment_detail_instead_of_number_suffix()
     test_structure_validator_rejects_number_only_plot_segment_name()
     test_assigner_does_not_launder_number_only_group_into_ranked_group()
+    test_group_order_uses_eight_digit_rank_and_keeps_compact_semantic_name()
+    test_structure_validator_rejects_long_plus_event_group_format()
+    test_structure_validator_rejects_short_rank_width()
     test_merge_assigns_new_segment_rank_and_governance_reorders_after_insertion()
     test_migration_splits_noncontiguous_legacy_group_runs()
     test_structure_validator_rejects_noncontiguous_reuse_of_plot_segment_name()

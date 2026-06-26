@@ -7,6 +7,7 @@
 1. 运行 `run_pipeline.py run`。
 2. 返回码为 `0` 时，检查章节是否已全部完成；未完成则读取断点信息并继续。完成时才结束本轮。
 3. 返回码为 `2` 时，把它视为正常待办交接，绝不向用户请示：
+   - 存在 `章节处理/_任务包/task_chNNN_analysis_regenerate.md` 时，忽略当前不合格的章节MD，重新阅读本章原文并覆盖生成完整10维章节分析；禁止创建或修改 Delta JSON。
    - 存在 `章节处理/_修复任务/repair_chNNN.md` 时，读取它和校验报告，修复对应章节 MD 或 Delta JSON。
    - 存在 `质量治理/周期审计/audit_XXX.md` 且缺少或需要重写 `correction_XXX.json` 时，读取审计任务包、治理规则和 Schema，完成真实结构审计并写出治理补丁。
    - 存在 `章节处理/_任务包/task_chNNN_analysis.md` 时，只写章节分析 MD；禁止创建或修改 Delta JSON。

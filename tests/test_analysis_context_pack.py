@@ -69,13 +69,13 @@ def test_summary_shows_visual_tags_inline():
         "介绍": {"标题": "测试", "描述": ""},
         "角色集": [],
         "事件集": [
-            _event("退婚现场", tags=["画面类型:冲突对峙"], supplementary=supp, group="0010-退婚"),
+            _event("退婚现场", tags=["画面类型:冲突对峙"], supplementary=supp, group="00000010-退婚尊严线冲突对峙羞辱反击"),
             _event("茶馆对话", tags=["对白"]),
         ],
         "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": [],
     }
     summary = summarize_story_structure(story)
-    assert "退婚现场(0010-退婚)[画面类型:冲突对峙,视觉用途:封面候选]" in summary
+    assert "退婚现场(00000010-退婚尊严线冲突对峙羞辱反击)[画面类型:冲突对峙,视觉用途:封面候选]" in summary
     # 没有视觉前缀的事件不应该加方括号
     assert "茶馆对话[" not in summary
 

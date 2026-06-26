@@ -19,8 +19,8 @@ from chronology import (
     BASE_TIME,
     chapter_time,
     chronological_event_order_errors,
+    event_group_name_errors,
     event_group_order_errors,
-    is_semantic_event_group_name,
     first_involved_chapter,
     is_iso_time,
     normalize_chapter_value,
@@ -366,9 +366,10 @@ def validate_item_schema(
         if isinstance(group, str) and group:
             rank, group_name = split_event_group(group)
             if rank is None or not group_name:
-                errors.append(f"{label}.分组 必须为段号-剧情段名+剧情线主题+叙事功能+爽点情绪点+冲突悬念类型，例如0010-退婚事件+情感尊严线+冲突爆发+羞辱反击+身份与尊严")
-            elif not is_semantic_event_group_name(group_name):
-                errors.append(f"{label}.分组 段号后必须是有语义的剧情段名，不能是纯编号[{group_name}]")
+                errors.append(f"{label}.分组 必须为8位段号-40字以内复合剧情段短名，例如00000010-退婚尊严线冲突爆发羞辱反击身份尊严")
+            else:
+                for error in event_group_name_errors(group_name):
+                    errors.append(f"{label}.分组 {error}")
 
     # 结构引用
     for field, target_collection, kind in STRUCTURAL_REF_FIELDS[collection_key]:

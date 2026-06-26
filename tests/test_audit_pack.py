@@ -37,6 +37,43 @@ def empty_delta(seq):
     return {"章节": f"第{seq:03d}章", "新增元素": empty, "修改元素": empty}
 
 
+def valid_analysis(seq):
+    return f"""# 第{seq:03d}章分析
+
+## 1. 剧情梗概
+本章围绕主角收到一封来信后前往约定地点展开。来信揭示旧承诺存在漏洞，主角决定主动求证，陌生人的出现又为后续留下悬念。
+
+## 2. 出场人物
+- 主角：从犹豫转为主动追查来信真相。
+
+## 3. 核心冲突
+主角必须在相信旧承诺和面对新证据之间作出选择。
+
+## 4. 信息增量
+来信说明旧日约定含有未公开条件。
+
+## 5. 伏笔与悬念
+陌生人的身份和真实目的尚待后续揭示。
+
+## 6. 爽点 / 虐点 / 情绪点
+主动追查带来期待、紧张与危机感。
+
+## 7. 章节功能判断
+本章承担冲突启动和悬念铺垫功能。
+
+## 8. 事件分组与标签建议
+来信求证承诺线冲突启动主动追查身份悬念。
+
+## 9. 画面 / 分镜 / 视觉资产候选
+| 候选编号 | 对应事件 | 画面价值 |
+|----------|----------|----------|
+| V01 | 主角阅读来信 | 中 |
+
+## 10. 结构提取提示
+应提取来信事件、约定地点和陌生人线索。
+"""
+
+
 def write_chapter_source(project, seq):
     path = project / "原文拆解" / f"第{seq:03d}章_测试.md"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,7 +85,7 @@ def write_completed_chapter(project, seq):
     chapter = write_chapter_source(project, seq)
     base = chapter.stem
     (project / "章节处理").mkdir(parents=True, exist_ok=True)
-    (project / "章节处理" / chapter.name).write_text(f"# 第{seq:03d}章分析\n", encoding="utf-8")
+    (project / "章节处理" / chapter.name).write_text(valid_analysis(seq), encoding="utf-8")
     write_json(project / "章节处理" / f"{base}.json", empty_delta(seq))
     for rel in [
         f"质量治理/delta校验/{base}.json",
@@ -97,6 +134,8 @@ def test_audit_pack_cli_creates_review_package():
         assert "commit-governance" in text
         assert "第001章_测试.md" in text
         assert "第005章_测试.json" in text
+        assert "顶层介绍" in text
+        assert "阶段性故事简介" in text
 
     print("[OK] audit-pack CLI 生成周期审计任务包")
 
@@ -108,10 +147,10 @@ def test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch():
         for seq in range(1, 5):
             write_completed_chapter(project, seq)
         write_chapter_source(project, 5)
-        (project / "章节处理" / "第005章_测试.md").write_text("# 第005章分析\n", encoding="utf-8")
+        (project / "章节处理" / "第005章_测试.md").write_text(valid_analysis(5), encoding="utf-8")
         write_json(project / "章节处理" / "第005章_测试.json", empty_delta(5))
         write_chapter_source(project, 6)
-        (project / "章节处理" / "第006章_测试.md").write_text("# 第006章分析\n", encoding="utf-8")
+        (project / "章节处理" / "第006章_测试.md").write_text(valid_analysis(6), encoding="utf-8")
         write_json(project / "章节处理" / "第006章_测试.json", empty_delta(6))
         rc = cmd_run(project)
         assert rc == 2
@@ -224,7 +263,7 @@ def test_chapter_delta_repairs_llm_json_before_validation():
         chapter = write_chapter_source(project, 1)
         base = chapter.stem
         (project / "章节处理").mkdir(parents=True, exist_ok=True)
-        (project / "章节处理" / chapter.name).write_text("# 第001章分析\n", encoding="utf-8")
+        (project / "章节处理" / chapter.name).write_text(valid_analysis(1), encoding="utf-8")
         malformed_delta = """```json
 {
   '章节': '第001章',

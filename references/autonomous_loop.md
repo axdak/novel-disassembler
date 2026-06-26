@@ -13,10 +13,11 @@
 
 返回 `2` 时按以下优先级处理：
 
-1. `章节处理/_修复任务/repair_chNNN.md`：修复本章 MD 或 Delta。
-2. `质量治理/周期审计/audit_XXX.md`：审计最近周期，写出真实 `correction_XXX.json`，再由下一次 `run` 自动提交。
-3. `章节处理/_任务包/task_chNNN_analysis.md`：只写章节分析 MD；禁止创建或修改Delta JSON。
-4. `章节处理/_任务包/task_chNNN_delta.md`：读取已完成的MD，只写本章Delta JSON；禁止重写MD。
+1. `章节处理/_任务包/task_chNNN_analysis_regenerate.md`：忽略当前不合格MD，重新阅读原文并覆盖生成完整10维章节分析；禁止创建或修改Delta JSON。
+2. `章节处理/_修复任务/repair_chNNN.md`：修复本章 MD 或 Delta。
+3. `质量治理/周期审计/audit_XXX.md`：审计最近周期，写出真实 `correction_XXX.json`，再由下一次 `run` 自动提交。
+4. `章节处理/_任务包/task_chNNN_analysis.md`：只写章节分析 MD；禁止创建或修改Delta JSON。
+5. `章节处理/_任务包/task_chNNN_delta.md`：读取已完成的MD，只写本章Delta JSON；禁止重写MD。
 
 ## 语义生成与机械修复边界
 

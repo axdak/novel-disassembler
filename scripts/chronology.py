@@ -10,6 +10,8 @@ from typing import Any
 
 
 BASE_TIME = "0001-01-01T00:00:00"
+EVENT_GROUP_RANK_WIDTH = 8
+MAX_EVENT_GROUP_NAME_LENGTH = 40
 _BASE_DATETIME = datetime(1, 1, 1)
 _CHAPTER_NUMBER_RE = re.compile(r"(?<!\d)(\d+)(?!\d)")
 _GROUP_ORDER_RE = re.compile(r"^(\d{4,})-(.+)$")
@@ -141,15 +143,40 @@ def split_event_group(group: Any) -> tuple[int | None, str]:
     return None, text
 
 
+def event_group_rank_text(group: Any) -> str | None:
+    """Return the visible rank text, preserving width for validation."""
+    text = str(group or "").strip()
+    matched = _GROUP_ORDER_RE.match(text)
+    return matched.group(1) if matched else None
+
+
+def format_event_group_rank(rank: int) -> str:
+    return str(rank).zfill(max(EVENT_GROUP_RANK_WIDTH, len(str(rank))))
+
+
+def event_group_name_errors(name: Any) -> list[str]:
+    text = str(name or "").strip()
+    errors: list[str] = []
+    if not text:
+        return errors
+    if _NUMERIC_GROUP_NAME_RE.fullmatch(text):
+        errors.append(f"段号后必须是有语义的复合剧情段短名，不能是纯编号[{text}]")
+    if "+" in text:
+        errors.append(f"复合剧情段短名不得使用+分隔长格式，需压缩为40字以内短语[{text}]")
+    if len(text) > MAX_EVENT_GROUP_NAME_LENGTH:
+        errors.append(f"复合剧情段短名必须控制在{MAX_EVENT_GROUP_NAME_LENGTH}字以内，实际{len(text)}字[{text}]")
+    return errors
+
+
 def is_semantic_event_group_name(name: Any) -> bool:
     """Whether a plot-segment name contains narrative information.
 
     The visible number before the dash is only a stable sort key.  A value such
-    as ``0010-0001`` therefore contains no usable grouping information and
+    as ``00000010-0001`` therefore contains no usable grouping information and
     must never survive a governance pass as a valid plot segment.
     """
     text = str(name or "").strip()
-    return bool(text) and not _NUMERIC_GROUP_NAME_RE.fullmatch(text)
+    return bool(text) and not event_group_name_errors(text)
 
 
 def event_group_name(event: dict[str, Any]) -> str:
@@ -179,7 +206,7 @@ def assign_event_group_orders(events: list[dict[str, Any]], *, split_repeated: b
     runs: list[tuple[str, list[dict[str, Any]]]] = []
     for event in events:
         base_name = event_group_name(event)
-        # Do not turn a missing/number-only name into ``0010-0001``.  Keeping
+        # Do not turn a missing/number-only name into ``00000010-0001``.  Keeping
         # the invalid source value lets validation report the data problem
         # clearly instead of laundering it into a plausible-looking group.
         if not is_semantic_event_group_name(base_name):
@@ -196,7 +223,7 @@ def assign_event_group_orders(events: list[dict[str, Any]], *, split_repeated: b
         if split_repeated and occurrences[base_name] > 1:
             display_name = f"{base_name}续{occurrences[base_name]}"
         rank = run_index * 10
-        rank_text = str(rank).zfill(max(4, len(str(rank))))
+        rank_text = format_event_group_rank(rank)
         for member in members:
             member["分组"] = f"{rank_text}-{display_name}"
 
@@ -210,21 +237,27 @@ def event_group_order_errors(events: list[dict[str, Any]]) -> list[str]:
 
     for index, event in enumerate(events):
         rank, name = split_event_group(event.get("分组"))
+        rank_text = event_group_rank_text(event.get("分组"))
         if not name:
             continue
         if rank is None:
-            errors.append(f"事件[{index}].分组 必须为段号-剧情段名+剧情线主题+叙事功能+爽点情绪点+冲突悬念类型，例如0010-退婚事件+情感尊严线+冲突爆发+羞辱反击+身份与尊严")
+            errors.append(f"事件[{index}].分组 必须为8位段号-40字以内复合剧情段短名，例如00000010-退婚尊严线冲突爆发羞辱反击身份尊严")
             continue
-        if not is_semantic_event_group_name(name):
-            errors.append(f"事件[{index}].分组 段号后必须是有语义的剧情段名，不能是纯编号[{name}]")
+        if rank_text is not None and len(rank_text) < EVENT_GROUP_RANK_WIDTH:
+            errors.append(f"事件[{index}].分组 段号必须至少{EVENT_GROUP_RANK_WIDTH}位，实际为{rank_text}")
+        name_errors = event_group_name_errors(name)
+        if name_errors:
+            errors.extend(f"事件[{index}].分组 {error}" for error in name_errors)
             continue
         if name != active_name:
             if active_name:
                 closed_names.add(active_name)
             if name in closed_names:
                 errors.append(f"事件[{index}].分组 非连续复用剧情段名称[{name}]；请拆分为新的剧情段")
-            if rank != expected_rank:
-                errors.append(f"事件[{index}].分组 段号应为{str(expected_rank).zfill(4)}，实际为{str(rank).zfill(4)}")
+            expected_rank_text = format_event_group_rank(expected_rank)
+            if rank != expected_rank or rank_text != expected_rank_text:
+                actual_rank_text = rank_text or str(rank)
+                errors.append(f"事件[{index}].分组 段号应为{expected_rank_text}，实际为{actual_rank_text}")
             active_name = name
             expected_rank += 10
         elif rank != expected_rank - 10:

@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from chronology import chapter_time
 from story_schema_rules import COLLECTION_KEYS
+from validate_chapter_analysis import validate_chapter_analysis_file
 from validate_structure import validate_structure_file
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
@@ -303,6 +304,7 @@ def artifact_paths(project_dir: Path, chapter: Path) -> Dict[str, Path]:
         "after": project_dir / "故事结构版本" / f"story_after_ch{seq:03d}.json",
         "diff": project_dir / "结构变更日志" / f"diff_ch{seq:03d}.json",
         "analysis_task": task_dir / f"task_ch{seq:03d}_analysis.md",
+        "analysis_regenerate_task": task_dir / f"task_ch{seq:03d}_analysis_regenerate.md",
         "delta_task": task_dir / f"task_ch{seq:03d}_delta.md",
         "repair": project_dir / "章节处理" / "_修复任务" / f"repair_ch{seq:03d}.md",
     }
@@ -793,6 +795,13 @@ def prepare_chapter_delta(project_dir: Path, chapter: Path, force: bool = False)
     if not p["analysis"].is_file():
         print(f"缺章节分析MD: {p['analysis']}")
         return 2
+    analysis_ok, analysis_errors = validate_chapter_analysis_file(p["analysis"])
+    if not analysis_ok:
+        write_analysis_regenerate_task(project_dir, chapter, analysis_errors)
+        p["delta_task"].unlink(missing_ok=True)
+        print("章节分析MD结构不合格，已交接重新生成；不会生成Delta任务。")
+        return 2
+    p["analysis_regenerate_task"].unlink(missing_ok=True)
     if p["delta_task"].exists() and not force:
         print(f"Delta提取任务包已存在: {p['delta_task']}")
         print(f"请只填写本章Delta JSON: {p['delta']}")
@@ -859,6 +868,21 @@ def write_repair_pack(project_dir: Path, chapter: Path, reason: str, report_path
     print(f"已生成修复任务包: {p['repair']}")
 
 
+def write_analysis_regenerate_task(project_dir: Path, chapter: Path, errors: List[str]) -> None:
+    """Ask the agent to regenerate a shrunken analysis from source, never from the bad MD."""
+    p = artifact_paths(project_dir, chapter)
+    content = render_prompt(
+        "chapter_analysis_regenerate.j2",
+        chapter_seq=seq_from_file(chapter),
+        analysis_path=p["analysis"],
+        chapter_text=chapter.read_text(encoding="utf-8", errors="ignore"),
+        errors=errors,
+    )
+    p["analysis_regenerate_task"].parent.mkdir(parents=True, exist_ok=True)
+    p["analysis_regenerate_task"].write_text(content, encoding="utf-8")
+    print(f"已生成章节分析重新生成任务: {p['analysis_regenerate_task']}")
+
+
 def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
@@ -877,9 +901,19 @@ def commit_chapter(project_dir: Path, seq: int, force: bool = False) -> int:
         prepare_chapter(project_dir, seq)
         print("已交接：等待章节分析MD。")
         return 2
+    analysis_ok, analysis_errors = validate_chapter_analysis_file(p["analysis"])
+    if not analysis_ok:
+        write_analysis_regenerate_task(project_dir, chapter, analysis_errors)
+        print("已交接：章节分析MD需要从原文重新生成。")
+        return 2
     if not p["delta"].is_file():
         print(f"缺Delta JSON: {p['delta']}")
-        prepare_chapter(project_dir, seq)
+        rc = prepare_chapter(project_dir, seq)
+        if rc != 0:
+            return rc
+        if p["analysis_regenerate_task"].is_file():
+            print("已交接：等待从原文重新生成完整章节分析MD。")
+            return 2
         print("已交接：等待基于章节分析的Delta JSON。")
         return 2
 
@@ -1026,7 +1060,12 @@ def cmd_run(
             print("已交接：等待章节分析MD。")
             return 2
         if not p["delta"].is_file():
-            prepare_chapter(project_dir, seq)
+            rc = prepare_chapter(project_dir, seq)
+            if rc != 0:
+                return rc
+            if p["analysis_regenerate_task"].is_file():
+                print("已交接：等待从原文重新生成完整章节分析MD。")
+                return 2
             print("已交接：等待基于章节分析的Delta JSON。")
             return 2
         rc = commit_chapter(project_dir, seq)
