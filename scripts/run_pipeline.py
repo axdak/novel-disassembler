@@ -9,7 +9,8 @@
 - 失败时回滚并生成 repair_prompt；
 - 全书/局部分析任务包生成。
 
-重要：脚本本身不直接调用大模型。所谓“持续运行”指：它会持续提交已具备产物的章节；遇到缺章节分析或Delta时，生成任务包并明确暂停点。
+重要：脚本默认不直接调用大模型。未配置 worker 命令时，遇到缺章节分析或 Delta 会生成任务包并明确暂停点；
+配置 worker 命令时，脚本只调用外部 worker 写当前任务包指定产物，再由本脚本验收、校验、合并和回滚。
 """
 
 from __future__ import annotations
@@ -98,6 +99,7 @@ MULTI_UNIT_ARTIFACT_RE = re.compile(r"^第\d+\s*(?:-|—|–|~|～|至|到)\s*\d
 # 单次子进程调用超时（秒）。生产场景默认 600；测试可用 ND_COMMAND_TIMEOUT=10
 # 之类的更短值，让卡死的子进程更快暴露而不是等满 10 分钟。
 INTERNAL_COMMAND_TIMEOUT_SECONDS = int(os.getenv("ND_COMMAND_TIMEOUT", "600"))
+DEFAULT_WORKER_TIMEOUT_SECONDS = int(os.getenv("ND_WORKER_TIMEOUT", "1800"))
 
 # 周期审计由外部 Agent 执行，脚本无法得知实际模型 tokenizer，故采用可配置的
 # 字符预算而不伪造精确 token 计数。默认值为 256k 上下文模型预留输出、系统提示和
@@ -158,6 +160,74 @@ def run_cmd(
     else:
         print(output)
     return returncode
+
+
+def worker_log_path(project_dir: Path, task_type: str) -> Path:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", task_type)
+    return project_dir / "质量治理" / "worker日志" / f"{safe_task}_{ts}.txt"
+
+
+def run_worker(
+    command: str,
+    project_dir: Path,
+    task_type: str,
+    task_pack: Path,
+    expected_output: Path,
+    chapter_seq: int = 0,
+    timeout: float = DEFAULT_WORKER_TIMEOUT_SECONDS,
+    retries: int = 0,
+) -> int:
+    """Run an external model/agent worker for exactly one task package."""
+    if not command:
+        return 2
+    attempts = retries + 1
+    for attempt in range(1, attempts + 1):
+        env = dict(os.environ)
+        env.update({
+            "PYTHONIOENCODING": "utf-8",
+            "ND_TASK_TYPE": task_type,
+            "ND_PROJECT_DIR": str(project_dir),
+            "ND_TASK_PACK": str(task_pack),
+            "ND_EXPECTED_OUTPUT": str(expected_output),
+            "ND_CHAPTER_SEQ": str(chapter_seq or ""),
+            "ND_WORKER_ATTEMPT": str(attempt),
+        })
+        log_path = worker_log_path(project_dir, task_type)
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(project_dir),
+                env=env,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=timeout,
+            )
+            output = proc.stdout or ""
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            output = timeout_output(exc, timeout)
+            returncode = 124
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(output, encoding="utf-8")
+        if returncode != 0:
+            print(f"worker失败: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
+            if attempt < attempts:
+                continue
+            return returncode
+        if not expected_output.is_file() or expected_output.stat().st_size == 0:
+            print(f"worker未写出期望产物: {expected_output}")
+            print(f"worker日志: {log_path}")
+            if attempt < attempts:
+                continue
+            return 1
+        print(f"worker完成: task={task_type} output={expected_output} log={log_path}")
+        return 0
+    return 1
 
 
 def repair_llm_json(path: Path, report_path: Path, backup: bool = False) -> int:
@@ -831,32 +901,63 @@ def run_periodic_governance(
     start: int,
     end: int,
     max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+    audit_command: str = "",
+    worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
+    worker_retries: int = 0,
 ) -> int:
     paths = audit_paths(project_dir, start, end)
     pack = write_audit_pack(project_dir, start, end, max_context_chars=max_context_chars)
     if pack is None:
         return 1
-    if not paths["correction"].is_file() or paths["correction"].stat().st_size == 0:
+    for attempt in range(worker_retries + 1):
+        if not paths["correction"].is_file() or paths["correction"].stat().st_size == 0:
+            update_audit_status(
+                paths,
+                status="awaiting_agent",
+                action="读取审计任务包，产出真实 correction Delta，然后再次运行 run_pipeline.py run。",
+            )
+            print(f"周期审计 {start:03d}-{end:03d} 待Agent处理：{paths['pack']}")
+            print(f"请产出真实治理补丁：{paths['correction']}")
+            if not audit_command:
+                return 2
+            rc = run_worker(
+                audit_command,
+                project_dir,
+                "audit_correction",
+                paths["pack"],
+                paths["correction"],
+                timeout=worker_timeout_seconds,
+                retries=0,
+            )
+            if rc != 0:
+                update_audit_status(paths, status="worker_failed", action="审计 worker 失败；查看 worker 日志后重试。")
+                return rc
+
+        rc = commit_governance(project_dir, str(paths["correction"]))
+        if rc == 0:
+            print(f"周期审计 {start:03d}-{end:03d} 治理补丁已提交并通过校验。")
+            return 0
+
         update_audit_status(
             paths,
             status="awaiting_agent",
-            action="读取审计任务包，产出真实 correction Delta，然后再次运行 run_pipeline.py run。",
+            action="读取治理校验报告，修复 correction Delta，然后再次运行 run_pipeline.py run。",
         )
-        print(f"周期审计 {start:03d}-{end:03d} 待Agent处理：{paths['pack']}")
-        print(f"请产出真实治理补丁：{paths['correction']}")
-        return 2
-
-    rc = commit_governance(project_dir, str(paths["correction"]))
-    if rc == 0:
-        print(f"周期审计 {start:03d}-{end:03d} 治理补丁已提交并通过校验。")
-        return 0
-
-    update_audit_status(
-        paths,
-        status="awaiting_agent",
-        action="读取治理校验报告，修复 correction Delta，然后再次运行 run_pipeline.py run。",
-    )
-    print(f"周期审计 {start:03d}-{end:03d} 治理补丁未通过；待Agent修复后重试。")
+        print(f"周期审计 {start:03d}-{end:03d} 治理补丁未通过；待Agent修复后重试。")
+        if not audit_command or attempt >= worker_retries:
+            return 2
+        rc = run_worker(
+            audit_command,
+            project_dir,
+            "audit_repair",
+            paths["pack"],
+            paths["correction"],
+            timeout=worker_timeout_seconds,
+            retries=0,
+        )
+        if rc != 0:
+            update_audit_status(paths, status="worker_failed", action="审计修复 worker 失败；查看 worker 日志后重试。")
+            return rc
     return 2
 
 
@@ -1157,7 +1258,12 @@ def cmd_resume(project_dir: Path) -> int:
     return 0
 
 
-def cmd_run_analysis(project_dir: Path) -> int:
+def cmd_run_analysis(
+    project_dir: Path,
+    chapter_command: str = "",
+    worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
+    worker_retries: int = 0,
+) -> int:
     """Create and validate every chapter-analysis MD without touching Delta flow."""
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
@@ -1172,12 +1278,40 @@ def cmd_run_analysis(project_dir: Path) -> int:
         if not p["analysis"].is_file():
             prepare_chapter_analysis(project_dir, chapter)
             print("已交接：等待章节分析MD。")
-            return 2
+            if not chapter_command:
+                return 2
+            rc = run_worker(
+                chapter_command,
+                project_dir,
+                "analysis",
+                p["analysis_task"],
+                p["analysis"],
+                seq_from_file(chapter),
+                timeout=worker_timeout_seconds,
+                retries=worker_retries,
+            )
+            if rc != 0:
+                return rc
+            continue
         analysis_ok, analysis_errors = validate_chapter_analysis_file(p["analysis"])
         if not analysis_ok:
             write_analysis_regenerate_task(project_dir, chapter, analysis_errors)
             print("已交接：等待从原文重新生成完整章节分析MD。")
-            return 2
+            if not chapter_command:
+                return 2
+            rc = run_worker(
+                chapter_command,
+                project_dir,
+                "analysis_regenerate",
+                p["analysis_regenerate_task"],
+                p["analysis"],
+                seq_from_file(chapter),
+                timeout=worker_timeout_seconds,
+                retries=worker_retries,
+            )
+            if rc != 0:
+                return rc
+            continue
         p["analysis_regenerate_task"].unlink(missing_ok=True)
     print("所有章节分析MD均已通过校验。")
     return 0
@@ -1188,6 +1322,10 @@ def cmd_run_delta(
     max_chapters: int = 0,
     audit_interval: int = 5,
     audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+    chapter_command: str = "",
+    audit_command: str = "",
+    worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
+    worker_retries: int = 0,
 ) -> int:
     """Require all chapter analyses before entering the existing serial Delta flow."""
     init_dirs(project_dir)
@@ -1203,18 +1341,50 @@ def cmd_run_delta(
         if not p["analysis"].is_file():
             prepare_chapter_analysis(project_dir, chapter)
             print("Delta阶段已交接：等待全部章节分析MD通过校验。")
-            return 2
+            if not chapter_command:
+                return 2
+            rc = run_worker(
+                chapter_command,
+                project_dir,
+                "analysis",
+                p["analysis_task"],
+                p["analysis"],
+                seq_from_file(chapter),
+                timeout=worker_timeout_seconds,
+                retries=worker_retries,
+            )
+            if rc != 0:
+                return rc
+            continue
         analysis_ok, analysis_errors = validate_chapter_analysis_file(p["analysis"])
         if not analysis_ok:
             write_analysis_regenerate_task(project_dir, chapter, analysis_errors)
             print("Delta阶段已交接：等待全部章节分析MD通过校验。")
-            return 2
+            if not chapter_command:
+                return 2
+            rc = run_worker(
+                chapter_command,
+                project_dir,
+                "analysis_regenerate",
+                p["analysis_regenerate_task"],
+                p["analysis"],
+                seq_from_file(chapter),
+                timeout=worker_timeout_seconds,
+                retries=worker_retries,
+            )
+            if rc != 0:
+                return rc
+            continue
         p["analysis_regenerate_task"].unlink(missing_ok=True)
     return cmd_run(
         project_dir,
         max_chapters=max_chapters,
         audit_interval=audit_interval,
         audit_max_context_chars=audit_max_context_chars,
+        chapter_command=chapter_command,
+        audit_command=audit_command,
+        worker_timeout_seconds=worker_timeout_seconds,
+        worker_retries=worker_retries,
     )
 
 
@@ -1224,15 +1394,28 @@ def cmd_run(
     audit_interval: int = 5,
     phase: str = "",
     audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+    chapter_command: str = "",
+    audit_command: str = "",
+    worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
+    worker_retries: int = 0,
 ) -> int:
     if phase == "analysis":
-        return cmd_run_analysis(project_dir)
+        return cmd_run_analysis(
+            project_dir,
+            chapter_command=chapter_command,
+            worker_timeout_seconds=worker_timeout_seconds,
+            worker_retries=worker_retries,
+        )
     if phase == "delta":
         return cmd_run_delta(
             project_dir,
             max_chapters=max_chapters,
             audit_interval=audit_interval,
             audit_max_context_chars=audit_max_context_chars,
+            chapter_command=chapter_command,
+            audit_command=audit_command,
+            worker_timeout_seconds=worker_timeout_seconds,
+            worker_retries=worker_retries,
         )
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
@@ -1244,6 +1427,9 @@ def cmd_run(
             audit["_start"],
             audit["_end"],
             audit_max_context_chars,
+            audit_command=audit_command,
+            worker_timeout_seconds=worker_timeout_seconds,
+            worker_retries=worker_retries,
         )
         if rc != 0:
             return rc
@@ -1258,23 +1444,87 @@ def cmd_run(
         if not p["analysis"].is_file():
             prepare_chapter(project_dir, seq)
             print("已交接：等待章节分析MD。")
-            return 2
+            if not chapter_command:
+                return 2
+            rc = run_worker(
+                chapter_command,
+                project_dir,
+                "analysis",
+                p["analysis_task"],
+                p["analysis"],
+                seq,
+                timeout=worker_timeout_seconds,
+                retries=worker_retries,
+            )
+            if rc != 0:
+                return rc
+            continue
         if not p["delta"].is_file():
             rc = prepare_chapter(project_dir, seq)
             if rc != 0:
                 return rc
             if p["analysis_regenerate_task"].is_file():
                 print("已交接：等待从原文重新生成完整章节分析MD。")
-                return 2
+                if not chapter_command:
+                    return 2
+                rc = run_worker(
+                    chapter_command,
+                    project_dir,
+                    "analysis_regenerate",
+                    p["analysis_regenerate_task"],
+                    p["analysis"],
+                    seq,
+                    timeout=worker_timeout_seconds,
+                    retries=worker_retries,
+                )
+                if rc != 0:
+                    return rc
+                continue
             print("已交接：等待基于章节分析的Delta JSON。")
-            return 2
+            if not chapter_command:
+                return 2
+            rc = run_worker(
+                chapter_command,
+                project_dir,
+                "delta",
+                p["delta_task"],
+                p["delta"],
+                seq,
+                timeout=worker_timeout_seconds,
+                retries=worker_retries,
+            )
+            if rc != 0:
+                return rc
+            continue
         rc = commit_chapter(project_dir, seq)
         if rc != 0:
+            if chapter_command and p["repair"].is_file():
+                worker_rc = run_worker(
+                    chapter_command,
+                    project_dir,
+                    "repair_chapter",
+                    p["repair"],
+                    p["delta"],
+                    seq,
+                    timeout=worker_timeout_seconds,
+                    retries=worker_retries,
+                )
+                if worker_rc != 0:
+                    return worker_rc
+                continue
             return rc
         processed += 1
         if audit_interval and seq % audit_interval == 0:
             start = seq - audit_interval + 1
-            rc = run_periodic_governance(project_dir, start, seq, audit_max_context_chars)
+            rc = run_periodic_governance(
+                project_dir,
+                start,
+                seq,
+                audit_max_context_chars,
+                audit_command=audit_command,
+                worker_timeout_seconds=worker_timeout_seconds,
+                worker_retries=worker_retries,
+            )
             if rc != 0:
                 return rc
         if max_chapters and processed >= max_chapters:
@@ -1706,6 +1956,10 @@ def main() -> int:
     p_run.add_argument("--audit-interval", type=int, default=5, help="每N章执行一次自动周期治理；0表示关闭")
     p_run.add_argument("--audit-max-context-chars", type=positive_int, default=DEFAULT_AUDIT_MAX_CONTEXT_CHARS, help="周期审计单包最大字符数；默认按256k上下文模型预留输出和安全余量")
     p_run.add_argument("--phase", choices=["auto", "analysis", "delta"], default="auto", help="运行阶段：auto=旧逐章流程；analysis=只循环生成/校验章节分析MD；delta=先要求全部MD合格，再循环生成/提交结构JSON")
+    p_run.add_argument("--chapter-command", default="", help="外部章节 worker 命令；由 run 传入当前任务包并验收章节分析/Delta/修复产物")
+    p_run.add_argument("--audit-command", default="", help="外部审计 worker 命令；由 run 传入周期审计任务包并验收 correction 产物")
+    p_run.add_argument("--worker-timeout-seconds", type=positive_int, default=DEFAULT_WORKER_TIMEOUT_SECONDS, help="单次外部 worker 命令超时秒数")
+    p_run.add_argument("--worker-retries", type=non_negative_int, default=0, help="外部 worker 失败或未写出产物后的重试次数")
 
     p_resume = sub.add_parser("resume", help="查看下一步缺什么")
     p_resume.add_argument("project_dir")
@@ -1792,6 +2046,10 @@ def main() -> int:
             args.audit_interval,
             phase=args.phase,
             audit_max_context_chars=args.audit_max_context_chars,
+            chapter_command=args.chapter_command,
+            audit_command=args.audit_command,
+            worker_timeout_seconds=args.worker_timeout_seconds,
+            worker_retries=args.worker_retries,
         )
     if args.cmd == "resume":
         return cmd_resume(project_dir)

@@ -224,6 +224,82 @@ def test_delta_phase_requires_every_analysis_md_before_first_delta_task():
         assert not list((project / "故事结构版本").glob("story_*"))
 
 
+def test_run_with_chapter_worker_continues_through_analysis_and_delta():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        chapter = project / "原文拆解" / "第001章_测试.md"
+        chapter.parent.mkdir(parents=True, exist_ok=True)
+        chapter.write_text("# 第001章\n测试原文。\n", encoding="utf-8")
+        paths = artifact_paths(project, chapter)
+        worker = root / "chapter_worker.py"
+        worker.write_text(
+            """
+import json
+import os
+from pathlib import Path
+
+task_type = os.environ["ND_TASK_TYPE"]
+output = Path(os.environ["ND_EXPECTED_OUTPUT"])
+output.parent.mkdir(parents=True, exist_ok=True)
+
+if task_type in ("analysis", "analysis_regenerate"):
+    output.write_text('''# 第001章分析
+
+## 1. 剧情梗概
+本章围绕主角接到意外来信后前往约定地点展开。来信暴露了旧日承诺的漏洞，主角在犹豫后决定当面求证，结尾以陌生人出现留下新的悬念。
+
+## 2. 出场人物
+- 主角：阅读来信后从迟疑转为主动求证。
+
+## 3. 核心冲突
+主角需要在相信旧承诺和面对新证据之间作出选择。
+
+## 4. 信息增量
+来信说明旧日承诺存在未公开的条件。
+
+## 5. 伏笔与悬念
+陌生人的身份及其掌握的信息待后续揭示。
+
+## 6. 爽点 / 虐点 / 情绪点
+主角主动追查带来期待与紧张。
+
+## 7. 章节功能判断
+本章承担冲突启动与悬念铺垫功能。
+
+## 8. 事件分组与标签建议
+来信求证承诺线冲突启动主动追查身份悬念。
+
+## 9. 画面 / 分镜 / 视觉资产候选
+| 候选编号 | 对应事件 | 画面价值 |
+|----------|----------|----------|
+| V01 | 主角阅读来信 | 中 |
+
+## 10. 结构提取提示
+应提取来信事件、约定地点与陌生人线索。
+''', encoding="utf-8")
+elif task_type in ("delta", "repair_chapter"):
+    empty = {"角色集": [], "事件集": [], "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []}
+    output.write_text(json.dumps({"章节": "第001章", "新增元素": empty, "修改元素": empty}, ensure_ascii=False, indent=2), encoding="utf-8")
+else:
+    raise SystemExit(f"unexpected task type: {task_type}")
+""",
+            encoding="utf-8",
+        )
+
+        rc = cmd_run(
+            project,
+            audit_interval=0,
+            chapter_command=f'"{sys.executable}" "{worker}"',
+        )
+
+        assert rc == 0
+        assert paths["analysis"].is_file()
+        assert paths["delta"].is_file()
+        assert paths["after"].is_file()
+
+
 if __name__ == "__main__":
     test_run_hands_off_analysis_then_delta_before_committing()
     test_run_regenerates_structurally_shrunken_analysis_before_delta_handoff()
@@ -231,4 +307,5 @@ if __name__ == "__main__":
     test_analysis_phase_hands_off_regeneration_for_invalid_md_only()
     test_run_cli_phase_analysis_generates_analysis_task_without_delta_task()
     test_delta_phase_requires_every_analysis_md_before_first_delta_task()
+    test_run_with_chapter_worker_continues_through_analysis_and_delta()
     print("\n全部测试通过 [PASS]")

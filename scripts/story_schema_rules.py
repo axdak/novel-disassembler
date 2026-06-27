@@ -73,7 +73,8 @@ COLLECTION_TO_TYPE = {
 MIN_COUNTS = {"角色集": 0, "事件集": 0, "地点集": 0, "线索集": 0, "阵营集": 0, "物品集": 0, "其他事项集": 0}
 DETAIL_KEY_RE = re.compile(r"^[\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9]+$")
 DETAIL_REF_RE = re.compile(r"^(角色|事件|地点|线索|阵营|物品|道具):(.+)$")
-LEGACY_FINAL_TRACE_DETAIL_FIELDS = {"来源章节", "提取理由", "首次出现章节", "最近更新章节"}
+LEGACY_FINAL_TRACE_DETAIL_FIELDS = {"来源章节", "首次出现章节", "最近更新章节"}
+DELTA_ONLY_DETAIL_FIELDS = {"提取理由"}
 SUPPLEMENTARY_TAGS_DETAIL_KEY = "补充标签"
 
 STRING_FIELDS = {"名称", "分组", "介绍", "发生地点", "父级地点", "座落地点", "父级阵营", "生日", "首次章节", "最近章节", "时间", "涉及章节"}
@@ -148,6 +149,13 @@ def parse_supplementary_tags(value: Any) -> List[str]:
 def dump_supplementary_tags(tags: List[str]) -> str:
     """输出稳定、紧凑且可逆的详情.补充标签 JSON 字符串。"""
     return json.dumps(tags, ensure_ascii=False, separators=(",", ":"))
+
+
+def final_disallowed_detail_fields(collection_key: str) -> Set[str]:
+    fields = set(LEGACY_FINAL_TRACE_DETAIL_FIELDS)
+    if collection_key != "事件集":
+        fields |= DELTA_ONLY_DETAIL_FIELDS
+    return fields
 
 
 def exact_name_sets(data: Dict[str, Any]) -> Dict[str, Set[str]]:
@@ -404,7 +412,7 @@ def validate_item_schema(
 
     if "详情" in item:
         if isinstance(item.get("详情"), dict):
-            for field in LEGACY_FINAL_TRACE_DETAIL_FIELDS & set(item["详情"]):
+            for field in final_disallowed_detail_fields(collection_key) & set(item["详情"]):
                 errors.append(f"{label}.详情.{field} 不得存在于最终元素；请保留在Delta、章节分析、治理补丁或变更日志")
         validate_detail_schema(item.get("详情"), label, name_sets, errors, warnings, mode=mode, alias_maps=alias_maps)
         detail_tags = item.get("详情", {}).get(SUPPLEMENTARY_TAGS_DETAIL_KEY) if isinstance(item.get("详情"), dict) else None

@@ -61,7 +61,8 @@ SCALAR_FIELDS = {
 
 # 介绍型字符串字段（追加去重）
 INTRO_FIELD = "介绍"
-LEGACY_TRACE_DETAIL_FIELDS = {"来源章节", "提取理由", "首次出现章节", "最近更新章节"}
+BASE_LEGACY_TRACE_DETAIL_FIELDS = {"来源章节", "首次出现章节", "最近更新章节"}
+DELTA_ONLY_DETAIL_FIELDS = {"提取理由"}
 
 # 顶层骨架与统一 Schema 共用集合定义，避免新增集合时合并器遗漏。
 TOPLEVEL_SKELETON = {"介绍": {"标题": "", "描述": ""}, **{key: [] for key in COLLECTION_KEYS}}
@@ -156,15 +157,24 @@ def merge_list_field(existing_list, new_list):
     return merged
 
 
-def merge_detail_field(existing_detail, new_detail):
+def detail_fields_to_skip(collection_key=""):
+    """最终结构中应从详情过滤掉的Delta/旧版追溯字段。"""
+    fields = set(BASE_LEGACY_TRACE_DETAIL_FIELDS)
+    if collection_key != "事件集":
+        fields |= DELTA_ONLY_DETAIL_FIELDS
+    return fields
+
+
+def merge_detail_field(existing_detail, new_detail, collection_key=""):
     """合并最终详情，过程追溯字段仅留在Delta/分析/治理补丁。"""
     if not isinstance(existing_detail, dict):
         existing_detail = {}
     if not isinstance(new_detail, dict):
         new_detail = {}
-    merged = {k: v for k, v in existing_detail.items() if k not in LEGACY_TRACE_DETAIL_FIELDS}
+    skip_fields = detail_fields_to_skip(collection_key)
+    merged = {k: v for k, v in existing_detail.items() if k not in skip_fields}
     for k, new_v in new_detail.items():
-        if k in LEGACY_TRACE_DETAIL_FIELDS:
+        if k in skip_fields:
             continue
         if k not in merged:
             merged[k] = new_v
@@ -221,7 +231,7 @@ def deep_merge_item(existing_item, delta_item, collection_key=""):
             )
         elif field == "详情":
             existing_item[field] = merge_detail_field(
-                existing_item.get(field, {}), new_v
+                existing_item.get(field, {}), new_v, collection_key=collection_key
             )
         elif field in SCALAR_FIELDS:
             existing_item[field] = merge_scalar_field(
@@ -278,7 +288,7 @@ def merge_collection(existing_items, new_items, modified_items, collection_key="
                 clean = {}
                 for k, v in item.items():
                     clean[k] = v
-                clean["详情"] = merge_detail_field({}, clean.get("详情", {}))
+                clean["详情"] = merge_detail_field({}, clean.get("详情", {}), collection_key=collection_key)
                 if collection_key == "事件集":
                     normalize_event_temporal_fields(clean)
                     new_idx = insert_event_in_chapter_order(existing_items, clean)

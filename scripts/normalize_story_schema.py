@@ -44,7 +44,8 @@ from chronology import (
 
 LIST_FIELDS = {"所属阵营", "关系", "参与成员", "目标事件", "涉及事件", "别名", "标签集"}
 STRING_FIELDS = {"名称", "分组", "介绍", "发生地点", "父级地点", "座落地点", "父级阵营", "生日", "时间"}
-LEGACY_TRACE_DETAIL_FIELDS = {"来源章节", "提取理由", "首次出现章节", "最近更新章节"}
+BASE_LEGACY_TRACE_DETAIL_FIELDS = {"来源章节", "首次出现章节", "最近更新章节"}
+DELTA_ONLY_DETAIL_FIELDS = {"提取理由"}
 REF_LIST_FIELDS = {
     "角色集": {"所属阵营": "阵营集"},
     "事件集": {"参与成员": "角色集", "目标事件": "事件集"},
@@ -129,18 +130,29 @@ def is_typed_ref(value: str) -> bool:
     return bool(isinstance(value, str) and DETAIL_REF_RE.match(value.strip()))
 
 
+def detail_fields_to_skip(collection_key: str) -> set[str]:
+    fields = set(BASE_LEGACY_TRACE_DETAIL_FIELDS)
+    if collection_key != "事件集":
+        fields |= DELTA_ONLY_DETAIL_FIELDS
+    return fields
+
+
 def normalize_detail_value(value: Any, logs: List[str]) -> Any:
     if isinstance(value, str):
         return value
     if isinstance(value, list):
-        # 只有全是 类型:名称 的 string[] 才保留数组；否则合并成字符串，避免违反详情数组规则。
+        # 只有全是 类型:名称 的 string[] 才保留数组；普通多值档案写成可逆 JSON 字符串数组。
         if value and all(isinstance(x, str) and is_typed_ref(x) for x in value):
             result = []
             for x in value:
                 if x not in result:
                     result.append(x)
             return result
-        return "；".join(stringify(x) for x in value if stringify(x))
+        return json.dumps(
+            [stringify(x).strip() for x in value if stringify(x).strip()],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
     return stringify(value)
 
 
@@ -325,9 +337,10 @@ def normalize_item(raw: Any, collection_key: str, logs: List[str]) -> Dict[str, 
     legacy_first = raw_detail.get("首次章节") or raw.get("首次章节") or raw_detail.get("首次出现章节", "")
     legacy_recent = raw_detail.get("最近章节") or raw.get("最近章节") or raw_detail.get("最近更新章节", "")
     if isinstance(raw_detail_value, dict):
+        skip_detail_fields = detail_fields_to_skip(collection_key)
         for k, v in raw_detail.items():
-            if k in LEGACY_TRACE_DETAIL_FIELDS:
-                logs.append(f"{raw.get('名称','?')}.详情.{k} 已移出最终元素；完整追溯保留在Delta、章节分析和治理补丁")
+            if k in skip_detail_fields:
+                logs.append(f"{raw.get('名称','?')}.详情.{k} 已移出最终元素；紧凑追溯字段保留在详情")
                 continue
             safe_key = sanitize_key(k)
             normalized_value = normalize_detail_value(v, logs)

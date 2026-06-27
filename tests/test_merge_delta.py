@@ -156,7 +156,7 @@ def test_detail_merge():
     print("[OK] 详情字段键级合并")
 
 
-def test_detail_evidence_is_not_merged_into_final_elements():
+def test_detail_reason_is_preserved_only_for_events_while_legacy_trace_is_not_merged():
     old = {
         "来源章节": "第001章",
         "提取理由": "首次进入宗门主线",
@@ -169,9 +169,11 @@ def test_detail_evidence_is_not_merged_into_final_elements():
         "首次出现章节": "第008章",
         "最近更新章节": "第008章",
     }
-    merged = merge_detail_field(old, new)
-    assert merged == {}
-    print("[OK] 最终元素详情不累积来源章节和提取理由")
+    event_detail = merge_detail_field(old, new, collection_key="事件集")
+    role_detail = merge_detail_field(old, new, collection_key="角色集")
+    assert event_detail == {"提取理由": "确认其宗门地位变化"}
+    assert role_detail == {}
+    print("[OK] 最终详情仅事件保留提取理由，其他元素不累积Delta追溯字段")
 
 
 def test_scalar_merge():

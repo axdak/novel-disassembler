@@ -2,12 +2,46 @@
 
 ## 主控器运行方式
 
-`run_pipeline.py` 不直接调用大模型。它负责推进已经具备产物的章节；遇到需要模型判断的章节、修复或审计工作时，会生成任务包并以返回码 `2` 交接给主控Agent。
+`run_pipeline.py` 默认不直接调用大模型。它负责推进已经具备产物的章节；遇到需要模型判断的章节、修复或审计工作时，会生成任务包并以返回码 `2` 交接给主控Agent。若显式配置外部 worker 命令，脚本会调用 worker 写当前任务包指定产物，并继续执行验收、校验、合并、快照和回滚。
 
 ```bash
 python <skill_path>/scripts/run_pipeline.py split <项目目录> <原文文件>
 python <skill_path>/scripts/run_pipeline.py run <项目目录>
 ```
+
+外部 worker 模式：
+```bash
+python <skill_path>/scripts/run_pipeline.py run <项目目录> \
+  --chapter-command "<章节worker命令>" \
+  --audit-command "<审计worker命令>" \
+  --worker-timeout-seconds 1800 \
+  --worker-retries 1
+```
+
+内置通用 wrapper 可接 Claude Code 或 Antigravity CLI：
+```bash
+python <skill_path>/scripts/run_pipeline.py run <项目目录> \
+  --chapter-command "python <skill_path>/tools/agent_worker.py --provider claude" \
+  --audit-command "python <skill_path>/tools/agent_worker.py --provider claude"
+```
+
+将 `--provider claude` 替换为 `--provider agy` 即可切换 provider。若 `agy.exe` 未加入 PATH，可在运行前设置：
+```powershell
+$env:ND_AGY_BIN = "C:\Users\53519\AppData\Local\agy\bin\agy.exe"
+```
+
+也可通过 `ND_CLAUDE_BIN` 指定 CLI 完整路径，通过 `ND_AGENT_MODEL` 指定模型。
+
+worker 命令通过环境变量接收任务：
+```text
+ND_TASK_TYPE=analysis | analysis_regenerate | delta | repair_chapter | audit_correction | audit_repair
+ND_PROJECT_DIR=<项目目录>
+ND_TASK_PACK=<任务包路径>
+ND_EXPECTED_OUTPUT=<期望输出文件>
+ND_CHAPTER_SEQ=<章节序号，审计任务为空>
+```
+
+worker 必须只写 `ND_EXPECTED_OUTPUT` 指向的目标产物。`run_pipeline.py` 不信任 worker 自述成功；只按目标文件、章节分析校验、Delta/governance 校验、结构校验和快照结果继续推进。
 
 如果希望先批量完成所有章节分析 MD，再进入结构 JSON 阶段，可显式拆成两段运行：
 ```bash
@@ -90,11 +124,12 @@ final-pack → 模型根据任务包修改草稿 → commit-final-draft
 
 ## 资源清单
 
-### scripts/（共 16 个）
+### scripts/
 
 **主控 & 进度**
-- `run_pipeline.py`：主控器，推进章节、生成任务包、提交章节/治理/最终交付；不直接调用大模型。
+- `run_pipeline.py`：主控器，推进章节、生成任务包、提交章节/治理/最终交付；默认不调用大模型，配置外部 worker 后可自动交接当前任务包并验收产物。
 - `progress_manager.py`：进度管理脚本，初始化、查询、更新、断点恢复、摘要生成。
+- `tools/agent_worker.py`：外部 CLI worker wrapper，支持 `claude`、`agy` 两种 provider，把当前任务包转换为 headless prompt，并把 CLI stdout 写入期望产物。
 
 **步骤 1：章节拆分**
 - `split_chapters.py`：章节拆分脚本，自动检测章节模式并拆分，支持 txt/docx。

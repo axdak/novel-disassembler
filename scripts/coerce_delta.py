@@ -33,10 +33,12 @@ from normalize_story_schema import (
     coerce_int,
     coerce_string_list,
     is_iso_time,
+    stringify,
 )
 from story_schema_rules import (
     COLLECTION_KEYS,
     TRACEABLE_COLLECTION_KEYS,
+    DETAIL_REF_RE,
     SUPPLEMENTARY_TAGS_DETAIL_KEY,
     dump_supplementary_tags,
 )
@@ -114,6 +116,28 @@ def _coerce_supplementary_tags(detail: Dict[str, Any], label: str, report: List[
     if tags:
         detail[SUPPLEMENTARY_TAGS_DETAIL_KEY] = dump_supplementary_tags(tags)
         report.append(f"{label}.详情.{SUPPLEMENTARY_TAGS_DETAIL_KEY} 数组 → JSON字符串")
+
+
+def _coerce_archive_arrays(detail: Dict[str, Any], label: str, report: List[str]) -> None:
+    """详情普通数组转 JSON 字符串数组；类型引用数组保持真实数组。"""
+    special_keys = {
+        SUPPLEMENTARY_TAGS_DETAIL_KEY,
+        "首次章节",
+        "最近章节",
+        "涉及章节",
+    }
+    for key, value in list(detail.items()):
+        if key in special_keys or not isinstance(value, list):
+            continue
+        if value and all(isinstance(item, str) and DETAIL_REF_RE.match(item.strip()) for item in value):
+            continue
+        encoded = json.dumps(
+            [stringify(item).strip() for item in value if stringify(item).strip()],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        detail[key] = encoded
+        report.append(f"{label}.详情.{key} 普通数组 → JSON字符串数组")
 
 
 def _coerce_role(item: Dict[str, Any], label: str, report: List[str]) -> None:
@@ -224,6 +248,7 @@ def _coerce_item(collection_key: str, item: Any, idx: int, report: List[str]) ->
     _move_top_trace_fields_to_detail(item, label, report)
     detail = _ensure_detail(item)
     _coerce_supplementary_tags(detail, label, report)
+    _coerce_archive_arrays(detail, label, report)
 
     # 元素类型专属纠错
     if collection_key == "角色集":

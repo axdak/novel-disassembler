@@ -339,3 +339,28 @@ def test_补充标签_数组_转json字符串():
     value = delta["新增元素"]["角色集"][0]["详情"]["补充标签"]
     assert value == '["莽撞","客栈"]'
     assert any("补充标签" in line for line in report)
+
+
+def test_普通详情数组_转json字符串数组():
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {"名称": "赖床装病", "详情": {"动作链条": ["赖床", "装病", "咳血", "被送医威胁"]}}
+    )
+
+    report = coerce_delta_in_place(delta)
+
+    value = delta["新增元素"]["事件集"][0]["详情"]["动作链条"]
+    assert value == '["赖床","装病","咳血","被送医威胁"]'
+    assert any("动作链条" in line for line in report)
+
+
+def test_详情元素引用数组_保持真实数组():
+    delta = _empty_delta()
+    delta["新增元素"]["角色集"].append(
+        {"名称": "甲", "详情": {"关联线索": ["线索:资金缺口"]}}
+    )
+
+    report = coerce_delta_in_place(delta)
+
+    assert delta["新增元素"]["角色集"][0]["详情"]["关联线索"] == ["线索:资金缺口"]
+    assert not any("关联线索" in line for line in report)

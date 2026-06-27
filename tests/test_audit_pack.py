@@ -247,6 +247,53 @@ def test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch():
     print("[OK] run 将周期审计交给Agent，提交真实补丁后继续下一章")
 
 
+def test_run_with_audit_worker_commits_periodic_audit_and_continues():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        for seq in range(1, 5):
+            write_completed_chapter(project, seq)
+        write_chapter_source(project, 5)
+        (project / "章节处理" / "第005章_测试.md").write_text(valid_analysis(5), encoding="utf-8")
+        write_json(project / "章节处理" / "第005章_测试.json", empty_delta(5))
+        write_chapter_source(project, 6)
+        (project / "章节处理" / "第006章_测试.md").write_text(valid_analysis(6), encoding="utf-8")
+        write_json(project / "章节处理" / "第006章_测试.json", empty_delta(6))
+        worker = root / "audit_worker.py"
+        worker.write_text(
+            """
+import json
+import os
+from pathlib import Path
+
+task_type = os.environ["ND_TASK_TYPE"]
+if task_type not in ("audit_correction", "audit_repair"):
+    raise SystemExit(f"unexpected task type: {task_type}")
+
+empty = {"角色集": [], "事件集": [], "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []}
+output = Path(os.environ["ND_EXPECTED_OUTPUT"])
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps({
+    "章节范围": "第001章-第005章",
+    "治理类型": "no_change",
+    "质量说明": "已检查角色、事件、地点、线索、阵营、物品，无需合并或降级。",
+    "证据范围": ["第001章", "第002章", "第003章", "第004章", "第005章"],
+    "新增元素": empty,
+    "修改元素": empty,
+}, ensure_ascii=False, indent=2), encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
+
+        rc = cmd_run(project, audit_command=f'"{sys.executable}" "{worker}"')
+
+        assert rc == 0
+        status = project / "质量治理" / "周期审计" / "audit_001-005.status.json"
+        assert load_status(status)["status"] == "committed"
+        assert (project / "故事结构版本" / "story_after_ch006.json").is_file()
+
+
 def load_status(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -397,6 +444,7 @@ def test_governance_patch_repairs_llm_json_before_validation():
 if __name__ == "__main__":
     test_audit_pack_cli_creates_review_package()
     test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch()
+    test_run_with_audit_worker_commits_periodic_audit_and_continues()
     test_manual_governance_reports_remain_separate()
     test_governance_patch_compresses_tags_before_validation()
     test_chapter_delta_repairs_llm_json_before_validation()

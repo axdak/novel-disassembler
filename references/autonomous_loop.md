@@ -4,6 +4,14 @@
 
 用户要求持续拆书时，主控Agent必须把 `run_pipeline.py run` 的任务交接视为下一项待办，而不是暂停点。推荐直接使用 `prompts/autonomous_run.j2` 作为启动提示词。
 
+如果用户显式配置外部 worker，可直接运行：
+
+```text
+run_pipeline.py run <项目目录> --chapter-command "<章节worker命令>" --audit-command "<审计worker命令>"
+```
+
+此时 `run_pipeline.py` 会在生成任务包后调用外部 worker，并继续执行校验、合并、快照和周期治理。worker 只负责写当前任务包指定的目标文件；主控Agent不应再手工重写该轮产物，除非 worker 失败或命令返回硬阻塞。
+
 ```text
 循环运行 run_pipeline.py run
   -> 返回 0：当前章节流程完成；检查是否仍有后续流程需要处理
@@ -38,7 +46,7 @@
 
 允许的脚本化操作仅限 format-only 机械修复：对已经存在的当前章节 Delta JSON 进行 JSON 语法、字符串转义、字段类型、章节时间、标签压缩等确定性修复。优先使用项目已有脚本（如 `repair_llm_json.py`、`coerce_delta.py`、`compress_tags.py`）。必要的一次性临时脚本不得读取原文生成内容，不得新增剧情事实，不得复用到多章生成。
 
-每 5 章触发一次周期审计时，`run` 会返回 `2` 并把审计状态记为 `awaiting_agent`。这不是失败，也不需要配置外部命令。主控Agent必须完成真实审计；禁止用空 Delta、伪造脚本、跳过校验或跳过审计来继续流程。只有源文件缺失、权限不足或必要工具不可用等硬阻塞，才可以停止并报告。
+每 5 章触发一次周期审计时，未配置 `--audit-command` 的 `run` 会返回 `2` 并把审计状态记为 `awaiting_agent`。这不是失败；主控Agent必须完成真实审计。配置 `--audit-command` 后，脚本会把审计包交给外部 worker，并用 `commit-governance` 验收 correction。两种模式都禁止用空 Delta、伪造脚本、跳过校验或跳过审计来继续流程。只有源文件缺失、权限不足或必要工具不可用等硬阻塞，才可以停止并报告。
 
 ## 进度汇报规范
 
@@ -53,6 +61,6 @@
 - 剩余：{剩余章数} 章
 ```
 
-## LLM API 模式（预留，默认关闭）
+## 外部 worker 模式（默认关闭）
 
-未来可以增加由 `run_pipeline.py` 编排的 LLM API 模式：脚本负责读取章节材料、调用模型、保存章节分析与Delta、校验、回滚和重试；模型只负责自然语言理解与结构提取。当前版本不启用该模式，也不要求配置 API key。未显式实现、配置并授权前，`run_pipeline.py run` 仍只生成任务包并等待主控Agent或人工产出。
+外部 worker 模式由 `--chapter-command` / `--audit-command` 显式开启。脚本负责生成任务包、调用 worker、验收目标文件、校验、回滚和重试；worker 只负责自然语言理解与结构提取。未显式配置前，`run_pipeline.py run` 仍只生成任务包并等待主控Agent或人工产出。

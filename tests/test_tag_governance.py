@@ -89,7 +89,7 @@ def test_empty_tag_set_passes_final_schema_validation():
     assert not any("标签集 为空" in warning for warning in warnings)
 
 
-def test_event_archive_detail_keys_can_preserve_rich_scene_labels():
+def test_event_archive_detail_keys_can_preserve_rich_scene_labels_without_punctuation():
     story = {
         "介绍": {"标题": "测试", "描述": "测试"},
         "角色集": [],
@@ -106,8 +106,8 @@ def test_event_archive_detail_keys_can_preserve_rich_scene_labels():
             "介绍": "角色围绕身份误会展开对峙。",
             "详情": {
                 "涉及章节": "0001",
-                "名场面台词（女扮男装误判）": "废话当然是雄的。",
-                "动作链条-压制与围观": "追问身份，然后点穴制住，众人围观。",
+                "名场面台词女扮男装误判": "废话当然是雄的。",
+                "动作链条压制与围观": "追问身份，然后点穴制住，众人围观。",
             },
         }],
         "地点集": [],
@@ -123,10 +123,17 @@ def test_event_archive_detail_keys_can_preserve_rich_scene_labels():
     assert warnings == []
 
 
-def test_detail_plain_arrays_remain_invalid_except_encoded_supplementary_tags():
+def test_detail_arrays_are_only_for_typed_references_or_encoded_supplementary_tags():
     story = story_with_tags(supplementary='["人物类型:核心主角"]')
+    story["角色集"][0]["详情"]["关联线索"] = ["线索:资金缺口"]
+    story["角色集"][0]["详情"]["动作链条"] = '["赖床","装病","咳血","被送医威胁"]'
+
+    errors, _ = validate_exact_story_schema(story, mode="process")
+
+    assert errors == []
+
     story["角色集"][0]["详情"]["动作链条"] = ["出场", "交锋"]
 
     errors, _ = validate_exact_story_schema(story, mode="process")
 
-    assert any("详情[动作链条]" in error and "string 或 JSON字符串数组" in error for error in errors)
+    assert any("详情[动作链条][0] 数组项必须是 类型:名称 格式" in error for error in errors)

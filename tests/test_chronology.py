@@ -19,7 +19,7 @@ from chronology import (
 )
 from merge_delta import deep_merge_item, merge_delta
 from migrate_chronology import migrate_story
-from normalize_story_schema import normalize_structure
+from normalize_story_schema import normalize_detail_value, normalize_structure
 from story_schema_rules import validate_exact_story_schema
 
 
@@ -64,6 +64,13 @@ def test_chapter_time_and_involved_chapters_are_canonical():
     assert not is_iso_time("0001-1-1T0:0:0")
     assert normalize_involved_chapters("0045，0043，0043，0044") == "0043，0044，0045"
     print("[OK] 章节时间和涉及章节字符串规范化")
+
+
+def test_normalize_detail_value_encodes_non_reference_arrays_as_json_strings():
+    logs = []
+
+    assert normalize_detail_value(["赖床", "装病", "咳血"], logs) == '["赖床","装病","咳血"]'
+    assert normalize_detail_value(["线索:资金缺口"], logs) == ["线索:资金缺口"]
 
 
 def test_normalization_adds_birthday_and_compact_chapter_fields():
@@ -138,7 +145,9 @@ def test_migration_drops_legacy_trace_and_stably_orders_events():
     assert migrated["角色集"][0]["生日"] == BASE_TIME
     assert migrated["角色集"][0]["详情"]["首次章节"] == "0001"
     assert migrated["角色集"][0]["详情"]["最近章节"] == "0008"
-    assert not {"来源章节", "提取理由", "首次出现章节", "最近更新章节"} & set(migrated["角色集"][0]["详情"])
+    assert not {"来源章节", "首次出现章节", "最近更新章节"} & set(migrated["角色集"][0]["详情"])
+    assert "提取理由" not in migrated["角色集"][0]["详情"]
+    assert migrated["事件集"][0]["详情"]["提取理由"] == "聚合重复事件"
     print("[OK] 存量迁移回填章节字段、清理最终追溯文本并稳定重排事件")
 
 
@@ -162,8 +171,8 @@ def test_repeated_trace_updates_do_not_grow_final_element():
             "详情": {"来源章节": f"第{seq:04d}章", "提取理由": f"第{seq}章提取"},
         }, "角色集")
     assert target["详情"] == {}
-    assert "来源章节" not in target and "提取理由" not in target
-    print("[OK] 千次追溯更新不增加最终元素JSON")
+    assert "来源章节" not in target
+    print("[OK] 千次非事件追溯更新不沉淀Delta理由，不累积旧来源章节")
 
 
 def test_structure_validator_rejects_legacy_trace_in_final_elements():
@@ -171,11 +180,27 @@ def test_structure_validator_rejects_legacy_trace_in_final_elements():
     story["角色集"] = [{
         "名称": "甲", "是否主角": True, "性别": 0, "年龄": 20, "生日": BASE_TIME,
         "所属阵营": [], "关系": [], "分组": "主角", "首次章节": "0001", "最近章节": "0001",
-        "别名": [], "标签集": [], "介绍": "甲", "详情": {"提取理由": "旧格式"},
+        "别名": [], "标签集": [], "介绍": "甲", "详情": {"来源章节": "第001章"},
     }]
     errors, _ = validate_exact_story_schema(story, mode="process")
     assert any("不得存在于最终元素" in error for error in errors), errors
     print("[OK] 结构校验器拒绝最终元素中的旧追溯字段")
+
+
+def test_structure_validator_allows_detail_reason_only_on_events():
+    story = empty_story()
+    story["角色集"] = [{
+        "名称": "甲", "是否主角": True, "性别": 0, "年龄": 20, "生日": BASE_TIME,
+        "所属阵营": [], "关系": [], "分组": "主角", "别名": [], "标签集": [], "介绍": "甲",
+        "详情": {"首次章节": "0001", "最近章节": "0001", "提取理由": "Delta审计理由"},
+    }]
+    story["事件集"] = [event("事件甲", "0001", "事件甲")]
+    story["事件集"][0]["详情"]["提取理由"] = "最终事件档案理由"
+
+    errors, _ = validate_exact_story_schema(story, mode="process")
+
+    assert any("角色[甲].详情.提取理由 不得存在于最终元素" in error for error in errors), errors
+    assert not any("事件[事件甲].详情.提取理由" in error for error in errors), errors
 
 
 def test_group_order_splits_same_plot_segment_at_chapter_boundary():
