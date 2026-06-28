@@ -80,6 +80,75 @@ def test_append_detail_keeps_relation_clues_as_json_string_array():
     ]
 
 
+def test_append_detail_keeps_archive_fields_as_json_string_arrays():
+    story = story_with_tags()
+    story["角色集"][0]["详情"]["人物轨迹"] = '["第001章：首次出场"]'
+    patch_doc = {
+        "章节范围": "第001章-第005章",
+        "新增元素": {},
+        "修改元素": {},
+        "治理操作": {
+            "追加详情": [{
+                "类型": "角色",
+                "名称": "张三",
+                "详情键": "人物轨迹",
+                "值": '["第001章：首次出场","第002章：主动推动冲突"]',
+            }, {
+                "类型": "角色",
+                "名称": "张三",
+                "详情键": "入库依据",
+                "值": "第001章：明确姓名并持续参与剧情",
+            }]
+        },
+    }
+
+    result, _, warnings = apply_ops(copy.deepcopy(story), patch_doc)
+
+    assert warnings == []
+    assert json.loads(result["角色集"][0]["详情"]["人物轨迹"]) == [
+        "第001章：首次出场",
+        "第002章：主动推动冲突",
+    ]
+    assert json.loads(result["角色集"][0]["详情"]["入库依据"]) == ["第001章：明确姓名并持续参与剧情"]
+
+
+def test_merge_element_keeps_archive_detail_fields_as_json_string_arrays():
+    story = story_with_tags()
+    story["角色集"][0]["详情"]["人物轨迹"] = '["第001章：首次出场"]'
+    story["角色集"].append({
+        "名称": "张三别称", "是否主角": True, "性别": 0, "年龄": 20,
+        "生日": "0001-01-01T00:00:00", "所属阵营": [], "关系": [],
+        "分组": "主角团", "别名": [], "标签集": [],
+        "介绍": "张三的重复条目。",
+        "详情": {
+            "首次章节": "0002",
+            "最近章节": "0002",
+            "人物轨迹": '["第001章：首次出场","第002章：以别称再次出场"]',
+            "物品轨迹": "第002章：佩剑成为身份标识",
+        },
+    })
+    patch_doc = {
+        "章节范围": "第001章-第005章",
+        "治理操作": {
+            "合并元素": [{
+                "类型": "角色",
+                "主": "张三",
+                "并入": ["张三别称"],
+            }]
+        },
+    }
+
+    result, _, warnings = apply_ops(copy.deepcopy(story), patch_doc)
+
+    assert warnings == []
+    assert [item["名称"] for item in result["角色集"]] == ["张三"]
+    assert json.loads(result["角色集"][0]["详情"]["人物轨迹"]) == [
+        "第001章：首次出场",
+        "第002章：以别称再次出场",
+    ]
+    assert json.loads(result["角色集"][0]["详情"]["物品轨迹"]) == ["第002章：佩剑成为身份标识"]
+
+
 def test_tag_governance_requires_full_conservation_and_no_overlap():
     story = story_with_tags()
     missing = tag_op(demoted=["热血"])
@@ -148,15 +217,25 @@ def test_event_archive_detail_keys_can_preserve_rich_scene_labels_without_punctu
     assert warnings == []
 
 
-def test_plain_archive_detail_keys_with_punctuation_are_rejected():
+def test_plain_archive_detail_keys_with_punctuation_warn_but_do_not_block():
     story = story_with_tags()
     story["角色集"][0]["详情"]["动作链条：赖床->装病"] = '["赖床","装病","咳血"]'
     story["角色集"][0]["详情"]["这句台词是不是太长但仍需保留？"] = "废话当然是雄的。"
 
+    errors, warnings = validate_exact_story_schema(story, mode="process")
+
+    assert errors == []
+    assert any("详情 键名[动作链条：赖床->装病]包含标点" in warning for warning in warnings)
+    assert any("详情 键名[这句台词是不是太长但仍需保留？]" in warning for warning in warnings)
+
+
+def test_machine_detail_fields_still_use_strict_keys():
+    story = story_with_tags()
+    story["角色集"][0]["详情"]["关联线索：错误"] = ["线索:资金缺口"]
+
     errors, _ = validate_exact_story_schema(story, mode="process")
 
-    assert any("详情 键名[动作链条：赖床->装病]不合规" in error for error in errors)
-    assert any("详情 键名[这句台词是不是太长但仍需保留？]不合规" in error for error in errors)
+    assert any("机器字段和明确引用字段键名不可包含标点" in error for error in errors)
 
 
 def test_detail_arrays_are_only_for_typed_references_or_encoded_supplementary_tags():

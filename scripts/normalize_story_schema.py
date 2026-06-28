@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Tuple
 from story_schema_rules import (
     COLLECTION_KEYS, TOP_LEVEL_KEYS, DEFAULTS, VALID_FIELDS, TRACEABLE_COLLECTION_KEYS,
     TYPE_TO_COLLECTION, COLLECTION_TO_TYPE, DETAIL_REF_RE, DETAIL_KEY_RE,
+    DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS, is_cumulative_detail_field,
     make_empty_structure, exact_name_sets, alias_to_name_maps,
 )
 from chronology import (
@@ -57,7 +58,7 @@ REF_SCALAR_FIELDS = {
     "阵营集": {"父级阵营": "阵营集", "座落地点": "地点集"},
 }
 RELATION_FIELD = "关系"
-CUMULATIVE_DETAIL_ARRAY_FIELDS = {"待确认信息", "疑似信息", "冲突声明", "关系线索", "待确认关系", "待确认引用"}
+CUMULATIVE_DETAIL_ARRAY_FIELDS = DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS
 
 
 def load_json(path: str) -> Any:
@@ -95,7 +96,7 @@ def stringify(value: Any) -> str:
 
 def sanitize_key(key: Any, fallback_prefix: str = "迁移字段") -> str:
     raw = str(key)
-    clean = re.sub(r"[^\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9]+", "", raw)
+    clean = raw.strip()
     return clean or fallback_prefix
 
 
@@ -111,7 +112,7 @@ def ensure_unique_key(detail: Dict[str, Any], key: str) -> str:
 def append_detail(detail: Dict[str, Any], key: str, value: Any, logs: List[str]) -> None:
     safe_key = sanitize_key(key)
     val = normalize_detail_value(value, logs)
-    if safe_key in CUMULATIVE_DETAIL_ARRAY_FIELDS:
+    if is_cumulative_detail_field(safe_key):
         detail[safe_key] = merge_cumulative_detail_array(detail.get(safe_key), val)
         return
     if safe_key in detail:

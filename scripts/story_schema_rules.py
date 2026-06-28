@@ -76,6 +76,52 @@ DETAIL_REF_RE = re.compile(r"^(角色|事件|地点|线索|阵营|物品|道具)
 LEGACY_FINAL_TRACE_DETAIL_FIELDS = {"来源章节", "首次出现章节", "最近更新章节"}
 DELTA_ONLY_DETAIL_FIELDS = {"提取理由"}
 SUPPLEMENTARY_TAGS_DETAIL_KEY = "补充标签"
+DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS = {
+    "待确认信息", "疑似信息", "冲突声明", "关系线索", "待确认关系", "待确认引用",
+    "入库依据", "档案线索", "证据摘录", "变化轨迹", "状态变化", "关键表现", "关键行为",
+    "动作链条", "冲突变化", "信息揭示", "情绪转折", "喜剧机制", "关键台词", "成员状态变化",
+    "人物轨迹", "性格线索", "动机线索", "关系变化", "人物证据",
+    "地点轨迹", "空间线索", "氛围线索", "场景变化", "地点证据",
+    "线索轨迹", "推进记录", "暗示证据", "回收记录", "线索证据",
+    "阵营轨迹", "立场变化", "成员变化", "势力变化", "阵营证据",
+    "物品轨迹", "用途线索", "持有变化", "物品状态", "物品证据",
+    "事项轨迹", "事项证据",
+}
+DETAIL_REF_ARRAY_KEYS = {"关联线索", "关联角色", "关联事件", "关联地点", "关联阵营", "关联物品"}
+DETAIL_CUMULATIVE_KEY_SUFFIXES = (
+    "线索", "轨迹", "证据", "记录", "变化", "状态", "表现", "行为",
+    "台词", "依据", "摘录", "链条", "机制", "用途", "细节",
+)
+
+
+def is_cumulative_detail_field(key: Any) -> bool:
+    """Whether a detail key should be merged as a JSON string array."""
+    if not isinstance(key, str):
+        return False
+    if key in DETAIL_REF_ARRAY_KEYS or key.startswith("关联"):
+        return False
+    return (
+        key in DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS
+        or key.endswith(DETAIL_CUMULATIVE_KEY_SUFFIXES)
+        or any(marker in key for marker in DETAIL_CUMULATIVE_KEY_SUFFIXES)
+    )
+
+
+STRICT_DETAIL_KEY_FIELDS = {
+    "首次章节", "最近章节", "涉及章节", SUPPLEMENTARY_TAGS_DETAIL_KEY, *DETAIL_REF_ARRAY_KEYS,
+}
+
+
+def detail_key_warnings(key: str) -> List[str]:
+    warnings: List[str] = []
+    if len(key) > 24:
+        warnings.append("键名过长，建议压缩为稳定短键")
+    punctuation_count = sum(1 for ch in key if not re.match(r"[\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9]", ch))
+    if punctuation_count >= 3:
+        warnings.append("键名包含较多标点，建议只在确有保真价值时保留")
+    if len(key) > 12 and any(mark in key for mark in "，。？！；：,.?!;:"):
+        warnings.append("键名看起来像句子，建议把完整句子放入值中")
+    return warnings
 
 STRING_FIELDS = {"名称", "分组", "介绍", "发生地点", "父级地点", "座落地点", "父级阵营", "生日", "首次章节", "最近章节", "时间", "涉及章节"}
 LIST_STRING_FIELDS = {"所属阵营", "关系", "参与成员", "目标事件", "涉及事件", "别名", "标签集"}
@@ -251,8 +297,16 @@ def validate_detail_schema(
         errors.append(f"{label}.详情 必须是对象")
         return
     for key, value in detail.items():
-        if not isinstance(key, str) or not DETAIL_KEY_RE.match(key):
-            errors.append(f"{label}.详情 键名[{key}]不合规：键名不可包含标点符号、空格或下划线")
+        if not isinstance(key, str) or not key.strip():
+            errors.append(f"{label}.详情 键名[{key}]不合规：键名必须是非空字符串")
+            continue
+        if key in STRICT_DETAIL_KEY_FIELDS or key.startswith("关联"):
+            if not DETAIL_KEY_RE.match(key):
+                errors.append(f"{label}.详情 键名[{key}]不合规：机器字段和明确引用字段键名不可包含标点符号、空格或下划线")
+        elif not DETAIL_KEY_RE.match(key):
+            warnings.append(f"{label}.详情 键名[{key}]包含标点/空格/下划线；普通档案字段允许保真，但建议优先使用稳定短键")
+        for warning in detail_key_warnings(key):
+            warnings.append(f"{label}.详情 键名[{key}] {warning}")
         if key == SUPPLEMENTARY_TAGS_DETAIL_KEY:
             try:
                 parse_supplementary_tags(value)

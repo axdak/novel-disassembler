@@ -3,9 +3,12 @@
 from __future__ import annotations
 import argparse, copy, json, os, shutil, sys, datetime as dt, tempfile
 from typing import Any, Dict, List, Set
-from story_schema_rules import COLLECTION_KEYS, TYPE_TO_COLLECTION, dump_supplementary_tags, parse_supplementary_tags
+from story_schema_rules import (
+    COLLECTION_KEYS, TYPE_TO_COLLECTION, DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
+    dump_supplementary_tags, is_cumulative_detail_field, parse_supplementary_tags,
+)
 
-CUMULATIVE_DETAIL_ARRAY_FIELDS={'待确认信息','疑似信息','冲突声明','关系线索','待确认关系','待确认引用'}
+CUMULATIVE_DETAIL_ARRAY_FIELDS=DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS
 
 
 def configure_stdio():
@@ -67,10 +70,10 @@ def append_detail_value(existing, incoming, detail_key=''):
     if incoming in (None,'',[],{}):
         return existing
     if existing in (None,'',[],{}):
-        if detail_key in CUMULATIVE_DETAIL_ARRAY_FIELDS:
+        if is_cumulative_detail_field(detail_key):
             return dump_json_string_array(parse_json_string_array_or_lines(incoming))
         return incoming
-    if detail_key in CUMULATIVE_DETAIL_ARRAY_FIELDS:
+    if is_cumulative_detail_field(detail_key):
         return dump_json_string_array(parse_json_string_array_or_lines(existing)+parse_json_string_array_or_lines(incoming))
     if isinstance(existing,str) and isinstance(incoming,str):
         old=existing.strip()
@@ -142,9 +145,7 @@ def merge_items(target, source):
             target.setdefault('详情',{})
             if not isinstance(target['详情'],dict): target['详情']={}
             for dk,dv in v.items():
-                if dk not in target['详情'] or target['详情'][dk] in ('',[],{}): target['详情'][dk]=dv
-                elif isinstance(target['详情'][dk],str) and isinstance(dv,str) and dv not in target['详情'][dk]: target['详情'][dk]+='\n'+dv
-                elif isinstance(target['详情'][dk],list) and isinstance(dv,list): target['详情'][dk]=append_unique(target['详情'][dk],dv)
+                target['详情'][dk]=append_detail_value(target['详情'].get(dk),dv,dk)
         elif k=='介绍' and isinstance(v,str) and v.strip():
             if not target.get(k): target[k]=v
             elif v not in target[k]: target[k]+='\n'+v
@@ -168,8 +169,10 @@ def apply_ops(data, patch):
                 src=data[key][si]; old=names(src); merge_items(target,src)
                 target['别名']=append_unique(target.get('别名',[]), list(old-{target.get('名称')}))
                 c=replace_refs(data,typ,old,target['名称'])
-                si=find_idx(data,typ,src.get('名称',s));
-                if si>=0 and data[key][si] is not target: data[key].pop(si)
+                for idx,candidate in enumerate(data[key]):
+                    if candidate is src and candidate is not target:
+                        data[key].pop(idx)
+                        break
                 logs.append(f'合并{typ}:{s} -> {target["名称"]}，替换引用{c}处')
         except Exception as e: warns.append(f'合并元素失败: {e}')
     # 重命名
@@ -238,7 +241,9 @@ def apply_ops(data, patch):
                     m=op['挂载到']; midx=find_idx(data,m['类型'],m['名称'])
                     if midx>=0:
                         mk=TYPE_TO_COLLECTION[m['类型']]; host=data[mk][midx]; host.setdefault('详情',{})
-                        host['详情'][m.get('详情键','降级元素')]=f"【{typ}】{item.get('名称',name)}；原介绍:{item.get('介绍','')}；原因:{op.get('原因','')}"
+                        detail_key=m.get('详情键','降级元素')
+                        detail_value=f"【{typ}】{item.get('名称',name)}；原介绍:{item.get('介绍','')}；原因:{op.get('原因','')}"
+                        host['详情'][detail_key]=append_detail_value(host['详情'].get(detail_key),detail_value,detail_key)
                 logs.append(f'{bucket}{typ}:{name}，移除引用{c}处')
             except Exception as e: warns.append(f'{bucket}失败: {e}')
     return data,logs,warns

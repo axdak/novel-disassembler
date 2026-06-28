@@ -42,8 +42,10 @@ from chronology import (
 )
 from story_schema_rules import (
     COLLECTION_KEYS,
+    DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
     SUPPLEMENTARY_TAGS_DETAIL_KEY,
     dump_supplementary_tags,
+    is_cumulative_detail_field,
     parse_supplementary_tags,
 )
 
@@ -77,7 +79,7 @@ SCALAR_FIELDS = {
 INTRO_FIELD = "介绍"
 BASE_LEGACY_TRACE_DETAIL_FIELDS = {"来源章节", "首次出现章节", "最近更新章节"}
 DELTA_ONLY_DETAIL_FIELDS = {"提取理由"}
-CUMULATIVE_DETAIL_ARRAY_FIELDS = {"待确认信息", "疑似信息", "冲突声明", "关系线索", "待确认关系", "待确认引用"}
+CUMULATIVE_DETAIL_ARRAY_FIELDS = DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS
 
 # 顶层骨架与统一 Schema 共用集合定义，避免新增集合时合并器遗漏。
 TOPLEVEL_SKELETON = {"介绍": {"标题": "", "描述": ""}, **{key: [] for key in COLLECTION_KEYS}}
@@ -192,7 +194,7 @@ def merge_detail_field(existing_detail, new_detail, collection_key=""):
         if k in skip_fields:
             continue
         if k not in merged:
-            if k in CUMULATIVE_DETAIL_ARRAY_FIELDS:
+            if is_cumulative_detail_field(k):
                 merged[k] = merge_json_string_array_field(None, new_v)
             else:
                 merged[k] = new_v
@@ -202,7 +204,7 @@ def merge_detail_field(existing_detail, new_detail, collection_key=""):
             merged[k] = merge_list_field(old_v, new_v)
         elif k == SUPPLEMENTARY_TAGS_DETAIL_KEY:
             merged[k] = merge_supplementary_tags_field(old_v, new_v)
-        elif k in CUMULATIVE_DETAIL_ARRAY_FIELDS:
+        elif is_cumulative_detail_field(k):
             merged[k] = merge_json_string_array_field(old_v, new_v)
         else:
             # string/其它: 新值非空则覆盖，空则保留旧值
