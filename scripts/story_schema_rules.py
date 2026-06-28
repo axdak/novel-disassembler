@@ -230,7 +230,7 @@ def _issue_ref(
         return
     msg = f"{label}.{field} 引用了不存在的{COLLECTION_TO_TYPE[target_collection]}[{clean}]"
     if mode in ("process", "delta"):
-        warnings.append(msg + "；过程阶段可能是前向引用，最终交付前必须补齐或移入详情.待确认信息")
+        warnings.append(msg + "；过程阶段可能是前向引用，最终交付前必须显式新增/合并目标或移入详情.关系线索/待确认信息")
     elif mode == "governance" and soft_governance:
         warnings.append(msg + "；治理阶段允许事件发生地点保留细粒度子空间，最终交付前建议收敛为已注册父级地点或正式地点")
     else:

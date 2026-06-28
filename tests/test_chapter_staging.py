@@ -2,6 +2,7 @@
 """章节分析与 Delta 两阶段交接测试。"""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -10,12 +11,39 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(ROOT))
 
-from run_pipeline import artifact_paths, cmd_run
+from run_pipeline import artifact_paths, cmd_run, effective_run_mode, resolve_worker_commands
 
 
 def write_json(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def test_worker_provider_supplies_builtin_worker_commands():
+    chapter_command, audit_command = resolve_worker_commands("", "", "agy", "worker")
+
+    assert "tools" in chapter_command
+    assert "agent_worker.py" in chapter_command
+    assert "--provider agy" in chapter_command
+    assert audit_command == chapter_command
+
+
+def test_codebuddy_worker_provider_supplies_builtin_worker_commands():
+    chapter_command, audit_command = resolve_worker_commands("", "", "codebuddy", "worker")
+
+    assert "agent_worker.py" in chapter_command
+    assert "--provider codebuddy" in chapter_command
+    assert audit_command == chapter_command
+
+
+def test_non_worker_routes_do_not_inject_external_worker_commands():
+    chapter_command, audit_command = resolve_worker_commands("", "", "codebuddy", "serial")
+
+    assert chapter_command == ""
+    assert audit_command == ""
+    assert effective_run_mode("serial", worker_provider="codebuddy") == "serial"
+    assert effective_run_mode("subagent", worker_provider="codebuddy") == "subagent"
+    assert effective_run_mode("auto", worker_provider="codebuddy") == "worker"
 
 
 def empty_story():
@@ -292,12 +320,123 @@ else:
             project,
             audit_interval=0,
             chapter_command=f'"{sys.executable}" "{worker}"',
+            worker_window="hidden",
         )
 
         assert rc == 0
         assert paths["analysis"].is_file()
         assert paths["delta"].is_file()
         assert paths["after"].is_file()
+
+
+def test_run_with_worker_provider_uses_builtin_wrapper_for_chapter_flow():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "project"
+        write_json(project / "\u6545\u4e8b\u7ed3\u6784_\u589e\u91cf.json", empty_story())
+        chapter = project / "\u539f\u6587\u62c6\u89e3" / "\u7b2c001\u7ae0_test.md"
+        chapter.parent.mkdir(parents=True, exist_ok=True)
+        chapter.write_text("# chapter 001\nsource text.\n", encoding="utf-8")
+        paths = artifact_paths(project, chapter)
+        fake_cli = root / "fake_agy_cli.py"
+        fake_cli.write_text(
+            """
+import json
+import os
+import sys
+
+sys.stdin.read()
+task_type = os.environ["ND_TASK_TYPE"]
+if task_type in ("analysis", "analysis_regenerate"):
+    print('''# 第001章分析
+## 1. 剧情梗概
+本章围绕主角接到意外来信后前往约定地点展开。来信暴露了旧日承诺的漏洞，主角在犹豫后决定当面求证，结尾以陌生人出现留下新的悬念。
+## 2. 出场人物
+- 主角：阅读来信后从迟疑转为主动求证。
+## 3. 核心冲突
+主角需要在相信旧承诺和面对新证据之间作出选择。
+## 4. 信息增量
+来信说明旧日承诺存在未公开的条件。
+## 5. 伏笔与悬念
+陌生人的身份及其掌握的信息待后续揭示。
+## 6. 爽点 / 虐点 / 情绪点
+主角主动追查带来期待与紧张。
+## 7. 章节功能判断
+本章承担冲突启动与悬念铺垫功能。
+## 8. 事件分组与标签建议
+来信求证承诺线冲突启动主动追查身份悬念。
+## 9. 画面 / 分镜 / 视觉资产候选
+| 候选编号 | 对应事件 | 画面价值 |
+|----------|----------|----------|
+| V01 | 主角阅读来信 | 中 |
+
+## 10. 结构提取提示
+应提取来信事件、约定地点与陌生人线索。''')
+elif task_type in ("delta", "repair_chapter"):
+    empty = {"角色集": [], "事件集": [], "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []}
+    print(json.dumps({"章节": "第001章", "新增元素": empty, "修改元素": empty}, ensure_ascii=False, indent=2))
+else:
+    raise SystemExit(f"unexpected task type: {task_type}")
+""",
+            encoding="utf-8",
+        )
+        old_agy = os.environ.get("ND_AGY_BIN")
+        os.environ["ND_AGY_BIN"] = f"{sys.executable} {fake_cli}"
+        try:
+            rc = cmd_run(
+                project,
+                audit_interval=0,
+                worker_provider="agy",
+                run_mode="worker",
+                worker_window="hidden",
+            )
+        finally:
+            if old_agy is None:
+                os.environ.pop("ND_AGY_BIN", None)
+            else:
+                os.environ["ND_AGY_BIN"] = old_agy
+
+        assert rc == 0
+        assert paths["analysis"].is_file()
+        assert paths["delta"].is_file()
+        assert paths["after"].is_file()
+
+
+def test_run_mode_serial_returns_handoff_even_when_worker_provider_is_configured():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "project"
+        write_json(project / "\u6545\u4e8b\u7ed3\u6784_\u589e\u91cf.json", empty_story())
+        chapter = project / "\u539f\u6587\u62c6\u89e3" / "\u7b2c001\u7ae0_test.md"
+        chapter.parent.mkdir(parents=True, exist_ok=True)
+        chapter.write_text("# chapter 001\nsource text.\n", encoding="utf-8")
+        paths = artifact_paths(project, chapter)
+        fake_cli = root / "fake_codebuddy_cli.py"
+        fake_cli.write_text(
+            """
+raise SystemExit("serial route must not call provider")
+""",
+            encoding="utf-8",
+        )
+        old_codebuddy = os.environ.get("ND_CODEBUDDY_BIN")
+        os.environ["ND_CODEBUDDY_BIN"] = f"{sys.executable} {fake_cli}"
+        try:
+            rc = cmd_run(
+                project,
+                audit_interval=0,
+                worker_provider="codebuddy",
+                run_mode="serial",
+                worker_window="hidden",
+            )
+        finally:
+            if old_codebuddy is None:
+                os.environ.pop("ND_CODEBUDDY_BIN", None)
+            else:
+                os.environ["ND_CODEBUDDY_BIN"] = old_codebuddy
+
+        assert rc == 2
+        assert paths["analysis_task"].is_file()
+        assert not paths["analysis"].is_file()
 
 
 if __name__ == "__main__":

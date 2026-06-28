@@ -14,6 +14,7 @@ xcopy prompts %TEMP_DIR%\prompts\ /e /i /h /y /q >nul
 xcopy references %TEMP_DIR%\references\ /e /i /h /y /q >nul
 xcopy schemas %TEMP_DIR%\schemas\ /e /i /h /y /q >nul
 xcopy scripts %TEMP_DIR%\scripts\ /e /i /h /y /q >nul
+xcopy tools %TEMP_DIR%\tools\ /e /i /h /y /q >nul
 copy requirements.txt %TEMP_DIR%\ >nul
 copy SKILL.md %TEMP_DIR%\ >nul
 

@@ -142,6 +142,16 @@ def test_delta_prompt_requires_event_four_dimension_compound_tag():
     assert "不下沉" in prompt
 
 
+def test_delta_prompt_requires_rich_event_archive_values_with_strict_keys():
+    prompt = Path("prompts/delta_extract.j2").read_text(encoding="utf-8")
+    assert "key 必须严格稳定" in prompt
+    assert "普通档案字段也要使用稳定短键" in prompt
+    assert "value 要充分承载档案信息" in prompt
+    for phrase in ["动作链条", "冲突变化", "信息揭示", "情绪转折", "关键台词"]:
+        assert phrase in prompt
+    assert "不要只写机器字段" in prompt
+
+
 def test_compress_delta_walks_both_buckets():
     delta = {
         "章节": "第001章",

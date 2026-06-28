@@ -2,6 +2,7 @@
 """标签治理的守恒、迁移和详情校验测试。"""
 
 import copy
+import json
 
 from apply_governance_ops import apply_ops
 from story_schema_rules import validate_exact_story_schema
@@ -53,6 +54,30 @@ def test_tag_governance_merges_existing_supplementary_tags_without_duplicates():
     result, _, warnings = apply_ops(copy.deepcopy(story), patch(tag_op()))
     assert warnings == []
     assert result["角色集"][0]["详情"]["补充标签"] == '["既有补充","热血","初入江湖"]'
+
+
+def test_append_detail_keeps_relation_clues_as_json_string_array():
+    story = story_with_tags()
+    story["角色集"][0]["详情"]["关系线索"] = '["父亲:郭巨侠；来源:第003章"]'
+    patch_doc = {
+        "章节范围": "第001章-第005章",
+        "新增元素": {},
+        "修改元素": {},
+        "治理操作": {
+            "追加详情": [{
+                "类型": "角色",
+                "名称": "张三",
+                "详情键": "关系线索",
+                "值": '["父亲:郭巨侠；来源:第003章","哥哥:莫小宝；来源:第003章"]',
+            }]
+        },
+    }
+    result, _, warnings = apply_ops(copy.deepcopy(story), patch_doc)
+    assert warnings == []
+    assert json.loads(result["角色集"][0]["详情"]["关系线索"]) == [
+        "父亲:郭巨侠；来源:第003章",
+        "哥哥:莫小宝；来源:第003章",
+    ]
 
 
 def test_tag_governance_requires_full_conservation_and_no_overlap():
@@ -121,6 +146,17 @@ def test_event_archive_detail_keys_can_preserve_rich_scene_labels_without_punctu
 
     assert errors == []
     assert warnings == []
+
+
+def test_plain_archive_detail_keys_with_punctuation_are_rejected():
+    story = story_with_tags()
+    story["角色集"][0]["详情"]["动作链条：赖床->装病"] = '["赖床","装病","咳血"]'
+    story["角色集"][0]["详情"]["这句台词是不是太长但仍需保留？"] = "废话当然是雄的。"
+
+    errors, _ = validate_exact_story_schema(story, mode="process")
+
+    assert any("详情 键名[动作链条：赖床->装病]不合规" in error for error in errors)
+    assert any("详情 键名[这句台词是不是太长但仍需保留？]不合规" in error for error in errors)
 
 
 def test_detail_arrays_are_only_for_typed_references_or_encoded_supplementary_tags():

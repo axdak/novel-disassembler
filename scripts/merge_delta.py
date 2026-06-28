@@ -40,7 +40,21 @@ from chronology import (
     insert_event_in_chapter_order,
     normalize_event_temporal_fields,
 )
-from story_schema_rules import COLLECTION_KEYS
+from story_schema_rules import (
+    COLLECTION_KEYS,
+    SUPPLEMENTARY_TAGS_DETAIL_KEY,
+    dump_supplementary_tags,
+    parse_supplementary_tags,
+)
+
+
+def configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+configure_stdio()
 
 
 NAME_FIELD = "名称"
@@ -63,6 +77,7 @@ SCALAR_FIELDS = {
 INTRO_FIELD = "介绍"
 BASE_LEGACY_TRACE_DETAIL_FIELDS = {"来源章节", "首次出现章节", "最近更新章节"}
 DELTA_ONLY_DETAIL_FIELDS = {"提取理由"}
+CUMULATIVE_DETAIL_ARRAY_FIELDS = {"待确认信息", "疑似信息", "冲突声明", "关系线索", "待确认关系", "待确认引用"}
 
 # 顶层骨架与统一 Schema 共用集合定义，避免新增集合时合并器遗漏。
 TOPLEVEL_SKELETON = {"介绍": {"标题": "", "描述": ""}, **{key: [] for key in COLLECTION_KEYS}}
@@ -177,11 +192,18 @@ def merge_detail_field(existing_detail, new_detail, collection_key=""):
         if k in skip_fields:
             continue
         if k not in merged:
-            merged[k] = new_v
+            if k in CUMULATIVE_DETAIL_ARRAY_FIELDS:
+                merged[k] = merge_json_string_array_field(None, new_v)
+            else:
+                merged[k] = new_v
             continue
         old_v = merged[k]
         if isinstance(old_v, list) and isinstance(new_v, list):
             merged[k] = merge_list_field(old_v, new_v)
+        elif k == SUPPLEMENTARY_TAGS_DETAIL_KEY:
+            merged[k] = merge_supplementary_tags_field(old_v, new_v)
+        elif k in CUMULATIVE_DETAIL_ARRAY_FIELDS:
+            merged[k] = merge_json_string_array_field(old_v, new_v)
         else:
             # string/其它: 新值非空则覆盖，空则保留旧值
             if new_v in (None, "", [], {}):
@@ -209,6 +231,42 @@ def merge_intro_string(old_intro, new_intro):
     if new_intro in old_intro:
         return old_intro
     return old_intro + "\n" + new_intro
+
+
+def parse_json_string_array_or_lines(value):
+    """累计型详情字段兼容旧换行文本，新格式统一输出 JSON 字符串数组。"""
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if not isinstance(value, str):
+        return [str(value).strip()] if str(value).strip() else []
+    text = value.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return [line.strip() for line in text.splitlines() if line.strip()]
+    if isinstance(parsed, list):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    return [text]
+
+
+def dump_json_string_array(items):
+    return json.dumps(merge_list_field([], items), ensure_ascii=False, separators=(",", ":"))
+
+
+def merge_json_string_array_field(old_v, new_v):
+    """详情中的长期累计字段：JSON 字符串数组追加去重。"""
+    return dump_json_string_array(parse_json_string_array_or_lines(old_v) + parse_json_string_array_or_lines(new_v))
+
+
+def merge_supplementary_tags_field(old_v, new_v):
+    """详情.补充标签 是 JSON 字符串数组，语义上必须追加去重。"""
+    old_tags = [] if old_v in (None, "") else parse_supplementary_tags(old_v)
+    new_tags = [] if new_v in (None, "") else parse_supplementary_tags(new_v)
+    return dump_supplementary_tags(merge_list_field(old_tags, new_tags))
 
 
 def deep_merge_item(existing_item, delta_item, collection_key=""):

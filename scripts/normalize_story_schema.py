@@ -57,6 +57,7 @@ REF_SCALAR_FIELDS = {
     "阵营集": {"父级阵营": "阵营集", "座落地点": "地点集"},
 }
 RELATION_FIELD = "关系"
+CUMULATIVE_DETAIL_ARRAY_FIELDS = {"待确认信息", "疑似信息", "冲突声明", "关系线索", "待确认关系", "待确认引用"}
 
 
 def load_json(path: str) -> Any:
@@ -110,6 +111,9 @@ def ensure_unique_key(detail: Dict[str, Any], key: str) -> str:
 def append_detail(detail: Dict[str, Any], key: str, value: Any, logs: List[str]) -> None:
     safe_key = sanitize_key(key)
     val = normalize_detail_value(value, logs)
+    if safe_key in CUMULATIVE_DETAIL_ARRAY_FIELDS:
+        detail[safe_key] = merge_cumulative_detail_array(detail.get(safe_key), val)
+        return
     if safe_key in detail:
         old = detail[safe_key]
         if isinstance(old, str) and isinstance(val, str):
@@ -124,6 +128,34 @@ def append_detail(detail: Dict[str, Any], key: str, value: Any, logs: List[str])
             detail[new_key] = val
     else:
         detail[safe_key] = val
+
+
+def parse_json_string_array_or_lines(value: Any) -> List[str]:
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if not isinstance(value, str):
+        text = str(value).strip()
+        return [text] if text else []
+    text = value.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return [line.strip() for line in text.splitlines() if line.strip()]
+    if isinstance(parsed, list):
+        return [str(item).strip() for item in parsed if str(item).strip()]
+    return [text]
+
+
+def merge_cumulative_detail_array(old_value: Any, new_value: Any) -> str:
+    items: List[str] = []
+    for item in parse_json_string_array_or_lines(old_value) + parse_json_string_array_or_lines(new_value):
+        if item and item not in items:
+            items.append(item)
+    return json.dumps(items, ensure_ascii=False, separators=(",", ":"))
 
 
 def is_typed_ref(value: str) -> bool:

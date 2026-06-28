@@ -73,6 +73,23 @@ def test_normalize_detail_value_encodes_non_reference_arrays_as_json_strings():
     assert normalize_detail_value(["线索:资金缺口"], logs) == ["线索:资金缺口"]
 
 
+def test_normalization_sanitizes_plain_archive_detail_keys_with_punctuation():
+    normalized, _ = normalize_structure({
+        **empty_story(),
+        "事件集": [{
+            **event("赖床装病", "0001", "赖床装病"),
+            "详情": {
+                "涉及章节": "0001",
+                "动作链条：赖床->装病": ["赖床", "装病", "咳血"],
+            },
+        }],
+    })
+
+    detail = normalized["事件集"][0]["详情"]
+    assert detail["动作链条赖床装病"] == '["赖床","装病","咳血"]'
+    assert "动作链条：赖床->装病" not in detail
+
+
 def test_normalization_adds_birthday_and_compact_chapter_fields():
     normalized, _ = normalize_structure({
         **empty_story(),

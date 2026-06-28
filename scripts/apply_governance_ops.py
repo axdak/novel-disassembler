@@ -5,6 +5,17 @@ import argparse, copy, json, os, shutil, sys, datetime as dt, tempfile
 from typing import Any, Dict, List, Set
 from story_schema_rules import COLLECTION_KEYS, TYPE_TO_COLLECTION, dump_supplementary_tags, parse_supplementary_tags
 
+CUMULATIVE_DETAIL_ARRAY_FIELDS={'待确认信息','疑似信息','冲突声明','关系线索','待确认关系','待确认引用'}
+
+
+def configure_stdio():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+configure_stdio()
+
 
 def load(p):
     with open(p,'r',encoding='utf-8') as f: return json.load(f)
@@ -36,6 +47,38 @@ def append_unique(a,b):
     for x in b or []:
         if x not in a: a.append(x)
     return a
+def parse_json_string_array_or_lines(value):
+    if value in (None,'',[],{}): return []
+    if isinstance(value,list): return [str(x).strip() for x in value if str(x).strip()]
+    if not isinstance(value,str):
+        text=str(value).strip()
+        return [text] if text else []
+    text=value.strip()
+    if not text: return []
+    try:
+        parsed=json.loads(text)
+    except json.JSONDecodeError:
+        return [line.strip() for line in text.splitlines() if line.strip()]
+    if isinstance(parsed,list): return [str(x).strip() for x in parsed if str(x).strip()]
+    return [text]
+def dump_json_string_array(items):
+    return json.dumps(append_unique([],items),ensure_ascii=False,separators=(',',':'))
+def append_detail_value(existing, incoming, detail_key=''):
+    if incoming in (None,'',[],{}):
+        return existing
+    if existing in (None,'',[],{}):
+        if detail_key in CUMULATIVE_DETAIL_ARRAY_FIELDS:
+            return dump_json_string_array(parse_json_string_array_or_lines(incoming))
+        return incoming
+    if detail_key in CUMULATIVE_DETAIL_ARRAY_FIELDS:
+        return dump_json_string_array(parse_json_string_array_or_lines(existing)+parse_json_string_array_or_lines(incoming))
+    if isinstance(existing,str) and isinstance(incoming,str):
+        old=existing.strip()
+        additions=[line.strip() for line in incoming.splitlines() if line.strip() and line.strip() not in old]
+        return old if not additions else old+'\n'+'\n'.join(additions)
+    if isinstance(existing,list) and isinstance(incoming,list):
+        return append_unique(existing,incoming)
+    return incoming
 def replace_refs(obj, typ, old: Set[str], new: str):
     count=0
     def repl(v):
@@ -154,7 +197,8 @@ def apply_ops(data, patch):
             idx=find_idx(data,op['类型'],op['名称']); key=TYPE_TO_COLLECTION[op['类型']]
             if idx<0: raise ValueError('找不到元素')
             item=data[key][idx]; item.setdefault('详情',{})
-            item['详情'][op.get('字段') or op.get('详情键')]=op.get('值',''); logs.append(f"追加详情 {op['类型']}:{op['名称']}")
+            detail_key=op.get('字段') or op.get('详情键')
+            item['详情'][detail_key]=append_detail_value(item['详情'].get(detail_key),op.get('值',''),detail_key); logs.append(f"追加详情 {op['类型']}:{op['名称']}")
         except Exception as e: warns.append(f'追加详情失败: {e}')
     # 标签治理：按补丁明确列出的降级项迁入可逆详情字段。
     for op in ops.get('治理标签',[]) or []:
@@ -189,14 +233,12 @@ def apply_ops(data, patch):
             try:
                 typ=op['类型']; name=op['名称']; key=TYPE_TO_COLLECTION[typ]; idx=find_idx(data,typ,name)
                 if idx<0: warns.append(f'找不到{bucket}{typ}:{name}'); continue
-                item=data[key][idx]; old=names(item)|{name}; c=remove_refs(data,typ,old)
+                item=data[key].pop(idx); old=names(item)|{name}; c=remove_refs(data,typ,old)
                 if degrade and op.get('挂载到'):
                     m=op['挂载到']; midx=find_idx(data,m['类型'],m['名称'])
                     if midx>=0:
                         mk=TYPE_TO_COLLECTION[m['类型']]; host=data[mk][midx]; host.setdefault('详情',{})
-                        host['详情'][m.get('详情键','降级元素')]=f"{typ}:{item.get('名称')}；原介绍:{item.get('介绍','')}；原因:{op.get('原因','')}"
-                idx=find_idx(data,typ,item.get('名称',name));
-                if idx>=0: data[key].pop(idx)
+                        host['详情'][m.get('详情键','降级元素')]=f"【{typ}】{item.get('名称',name)}；原介绍:{item.get('介绍','')}；原因:{op.get('原因','')}"
                 logs.append(f'{bucket}{typ}:{name}，移除引用{c}处')
             except Exception as e: warns.append(f'{bucket}失败: {e}')
     return data,logs,warns

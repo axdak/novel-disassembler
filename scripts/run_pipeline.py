@@ -18,10 +18,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -100,12 +104,20 @@ MULTI_UNIT_ARTIFACT_RE = re.compile(r"^第\d+\s*(?:-|—|–|~|～|至|到)\s*\d
 # 之类的更短值，让卡死的子进程更快暴露而不是等满 10 分钟。
 INTERNAL_COMMAND_TIMEOUT_SECONDS = int(os.getenv("ND_COMMAND_TIMEOUT", "600"))
 DEFAULT_WORKER_TIMEOUT_SECONDS = int(os.getenv("ND_WORKER_TIMEOUT", "1800"))
+DEFAULT_WORKER_RETRIES = int(os.getenv("ND_WORKER_RETRIES", "2"))
+RUN_MODES = ("auto", "subagent", "serial", "worker")
+WORKER_PROVIDERS = ("manual", "auto", "agy", "codebuddy")
+WORKER_WINDOWS = ("hidden", "powershell", "powershell-keep")
+DEFAULT_WORKER_WINDOW = os.getenv("ND_WORKER_WINDOW", "powershell")
+if DEFAULT_WORKER_WINDOW not in WORKER_WINDOWS:
+    DEFAULT_WORKER_WINDOW = "powershell"
 
 # 周期审计由外部 Agent 执行，脚本无法得知实际模型 tokenizer，故采用可配置的
 # 字符预算而不伪造精确 token 计数。默认值为 256k 上下文模型预留输出、系统提示和
 # 工具调用后的保守输入上限；调用方可按实际模型覆盖。
 DEFAULT_AUDIT_MAX_CONTEXT_CHARS = 160_000
 AUDIT_CONTEXT_FORMAT_VERSION = 2
+AUDIT_RESOLVED_STATUSES = {"committed", "covered_by_children"}
 
 
 def non_negative_int(value: str) -> int:
@@ -134,14 +146,178 @@ def timeout_output(exc: subprocess.TimeoutExpired, timeout_seconds: float) -> st
     return f"{output}\n命令执行超时（{timeout_seconds:g} 秒），已终止。\n"
 
 
+def stream_shell_command(
+    command: str,
+    cwd: Path,
+    env: Dict[str, str],
+    timeout: float,
+) -> Tuple[int, str]:
+    """Run a shell command while forwarding combined stdout/stderr live."""
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=str(cwd),
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    output_queue: "queue.Queue[str]" = queue.Queue()
+
+    def read_output() -> None:
+        assert proc.stdout is not None
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                output_queue.put(line)
+        finally:
+            proc.stdout.close()
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+    output_parts: List[str] = []
+    deadline = time.monotonic() + timeout if timeout else None
+
+    def drain_output() -> None:
+        while True:
+            try:
+                line = output_queue.get_nowait()
+            except queue.Empty:
+                break
+            output_parts.append(line)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+    while True:
+        drain_output()
+        if proc.poll() is not None:
+            break
+        if deadline is not None and time.monotonic() >= deadline:
+            proc.kill()
+            proc.wait()
+            reader.join(timeout=1)
+            drain_output()
+            message = timeout_output(subprocess.TimeoutExpired(command, timeout, output=""), timeout)
+            output_parts.append(message)
+            sys.stdout.write(message)
+            sys.stdout.flush()
+            return 124, "".join(output_parts)
+        time.sleep(0.1)
+
+    reader.join(timeout=1)
+    drain_output()
+    return proc.returncode or 0, "".join(output_parts)
+
+
+def ps_single_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def run_visible_powershell_command(
+    command: str,
+    cwd: Path,
+    env: Dict[str, str],
+    timeout: float,
+    log_path: Path,
+    keep_open: bool = False,
+) -> Tuple[int, str]:
+    """Run a command in a visible PowerShell window and mirror output to a log."""
+    if os.name != "nt":
+        return stream_shell_command(command, cwd, env, timeout)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env_lines = [
+        f"$env:{key} = {ps_single_quote(value)}"
+        for key, value in sorted(env.items())
+        if key.startswith("ND_") or key in {"PYTHONIOENCODING", "NODE_OPTIONS"}
+    ]
+    close_lines = [
+        "Write-Host ''",
+        "Write-Host ('worker exited with code: ' + $rc)",
+    ]
+    if keep_open:
+        close_lines.append("Read-Host 'Press Enter to close this worker window' | Out-Null")
+    script = "\n".join(
+        [
+            "$ErrorActionPreference = 'Continue'",
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+            "$Host.UI.RawUI.WindowTitle = 'novel-disassembler worker: ' + $env:ND_TASK_TYPE",
+            f"Set-Location -LiteralPath {ps_single_quote(str(cwd))}",
+            *env_lines,
+            f"$logPath = {ps_single_quote(str(log_path))}",
+            "$rcPath = [System.IO.Path]::ChangeExtension($logPath, '.rc')",
+            f"$cmd = {ps_single_quote(command)}",
+            "Write-Host ('worker cwd: ' + (Get-Location).Path)",
+            "Write-Host ('worker visible command: ' + $cmd)",
+            "& cmd.exe /d /s /c $cmd 2>&1 | Tee-Object -FilePath $logPath -Append",
+            "$rc = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } else { 0 }",
+            "Set-Content -LiteralPath $rcPath -Value $rc -Encoding UTF8",
+            *close_lines,
+            "exit $rc",
+        ]
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".ps1", delete=False, encoding="utf-8") as tmp:
+        tmp.write(script)
+        script_path = Path(tmp.name)
+    try:
+        args = [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script_path),
+        ]
+        proc = subprocess.Popen(
+            ["powershell.exe", *args],
+            cwd=str(cwd),
+            env=env,
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+        try:
+            proc.wait(timeout=timeout + 10 if timeout else None)
+            launcher_output = ""
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            launcher_output = ""
+            message = timeout_output(subprocess.TimeoutExpired(command, timeout, output=launcher_output), timeout)
+            log_path.write_text((log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else "") + message, encoding="utf-8")
+            return 124, (launcher_output or "") + message
+        output = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else (launcher_output or "")
+        if launcher_output:
+            output = launcher_output + output
+        rc_path = log_path.with_suffix(".rc")
+        if rc_path.exists():
+            try:
+                returncode = int(rc_path.read_text(encoding="utf-8", errors="replace").strip())
+            except ValueError:
+                returncode = proc.returncode or 1
+            try:
+                rc_path.unlink()
+            except OSError:
+                pass
+        else:
+            returncode = proc.returncode or 0
+        return returncode, output
+    finally:
+        try:
+            script_path.unlink()
+        except OSError:
+            pass
+
+
 def run_cmd(
     cmd: List[str],
     report_path: Optional[Path] = None,
     timeout: float = INTERNAL_COMMAND_TIMEOUT_SECONDS,
 ) -> int:
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
     try:
         proc = subprocess.run(
             cmd,
+            env=env,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -168,6 +344,43 @@ def worker_log_path(project_dir: Path, task_type: str) -> Path:
     return project_dir / "质量治理" / "worker日志" / f"{safe_task}_{ts}.txt"
 
 
+def effective_run_mode(
+    run_mode: str,
+    chapter_command: str = "",
+    audit_command: str = "",
+    worker_provider: str = "manual",
+) -> str:
+    if not run_mode:
+        run_mode = "auto"
+    if run_mode not in RUN_MODES:
+        raise ValueError(f"unsupported run mode: {run_mode}")
+    if run_mode != "auto":
+        return run_mode
+    has_worker_config = bool(chapter_command or audit_command or (worker_provider and worker_provider != "manual"))
+    return "worker" if has_worker_config else "subagent"
+
+
+def builtin_agent_worker_command(provider: str) -> str:
+    if provider not in WORKER_PROVIDERS or provider == "manual":
+        raise ValueError(f"unsupported worker provider: {provider}")
+    wrapper = Path(__file__).resolve().parent.parent / "tools" / "agent_worker.py"
+    return subprocess.list2cmdline([sys.executable, str(wrapper), "--provider", provider])
+
+
+def resolve_worker_commands(
+    chapter_command: str,
+    audit_command: str,
+    worker_provider: str,
+    run_mode: str = "worker",
+) -> Tuple[str, str]:
+    if effective_run_mode(run_mode, chapter_command, audit_command, worker_provider) != "worker":
+        return "", ""
+    if not worker_provider or worker_provider == "manual":
+        return chapter_command, audit_command
+    command = builtin_agent_worker_command(worker_provider)
+    return chapter_command or command, audit_command or command
+
+
 def run_worker(
     command: str,
     project_dir: Path,
@@ -177,6 +390,7 @@ def run_worker(
     chapter_seq: int = 0,
     timeout: float = DEFAULT_WORKER_TIMEOUT_SECONDS,
     retries: int = 0,
+    worker_window: str = DEFAULT_WORKER_WINDOW,
 ) -> int:
     """Run an external model/agent worker for exactly one task package."""
     if not command:
@@ -194,26 +408,24 @@ def run_worker(
             "ND_WORKER_ATTEMPT": str(attempt),
         })
         log_path = worker_log_path(project_dir, task_type)
-        try:
-            proc = subprocess.run(
+        print(f"worker start: task={task_type} attempt={attempt}/{attempts} log={log_path}")
+        if worker_window in ("powershell", "powershell-keep"):
+            if worker_window == "powershell-keep":
+                print("worker window: opening visible PowerShell; press Enter in that window after it exits.")
+            else:
+                print("worker window: opening visible PowerShell; it will close when the worker exits.")
+            returncode, output = run_visible_powershell_command(
                 command,
-                shell=True,
-                cwd=str(project_dir),
-                env=env,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=timeout,
+                project_dir,
+                env,
+                timeout,
+                log_path,
+                keep_open=worker_window == "powershell-keep",
             )
-            output = proc.stdout or ""
-            returncode = proc.returncode
-        except subprocess.TimeoutExpired as exc:
-            output = timeout_output(exc, timeout)
-            returncode = 124
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text(output, encoding="utf-8")
+        else:
+            returncode, output = stream_shell_command(command, project_dir, env, timeout)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(output, encoding="utf-8")
         if returncode != 0:
             print(f"worker失败: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
             if attempt < attempts:
@@ -226,6 +438,71 @@ def run_worker(
                 continue
             return 1
         print(f"worker完成: task={task_type} output={expected_output} log={log_path}")
+        return 0
+    return 1
+
+
+def run_multi_output_worker(
+    command: str,
+    project_dir: Path,
+    task_type: str,
+    task_pack: Path,
+    expected_outputs: List[Path],
+    chapter_seq: int = 0,
+    timeout: float = DEFAULT_WORKER_TIMEOUT_SECONDS,
+    retries: int = 0,
+    worker_window: str = DEFAULT_WORKER_WINDOW,
+) -> int:
+    """Run an external worker for a task package that owns several artifacts."""
+    if not command:
+        return 2
+    attempts = retries + 1
+    for attempt in range(1, attempts + 1):
+        env = dict(os.environ)
+        env.update({
+            "PYTHONIOENCODING": "utf-8",
+            "ND_TASK_TYPE": task_type,
+            "ND_PROJECT_DIR": str(project_dir),
+            "ND_TASK_PACK": str(task_pack),
+            "ND_EXPECTED_OUTPUTS": json.dumps([str(path) for path in expected_outputs], ensure_ascii=False),
+            "ND_EXPECTED_OUTPUT": str(expected_outputs[0]) if expected_outputs else "",
+            "ND_CHAPTER_SEQ": str(chapter_seq or ""),
+            "ND_WORKER_ATTEMPT": str(attempt),
+        })
+        log_path = worker_log_path(project_dir, task_type)
+        print(f"worker start: task={task_type} attempt={attempt}/{attempts} log={log_path}")
+        if worker_window in ("powershell", "powershell-keep"):
+            if worker_window == "powershell-keep":
+                print("worker window: opening visible PowerShell; press Enter in that window after it exits.")
+            else:
+                print("worker window: opening visible PowerShell; it will close when the worker exits.")
+            returncode, output = run_visible_powershell_command(
+                command,
+                project_dir,
+                env,
+                timeout,
+                log_path,
+                keep_open=worker_window == "powershell-keep",
+            )
+        else:
+            returncode, output = stream_shell_command(command, project_dir, env, timeout)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(output, encoding="utf-8")
+        if returncode != 0:
+            print(f"worker failed: task={task_type} attempt={attempt}/{attempts} rc={returncode} log={log_path}")
+            if attempt < attempts:
+                continue
+            return returncode
+        missing = [path for path in expected_outputs if not path.is_file() or path.stat().st_size == 0]
+        if missing:
+            print("worker did not write expected artifact(s):")
+            for path in missing:
+                print(f"  - {path}")
+            print(f"worker log: {log_path}")
+            if attempt < attempts:
+                continue
+            return 1
+        print(f"worker complete: task={task_type} outputs={len(expected_outputs)} log={log_path}")
         return 0
     return 1
 
@@ -627,6 +904,68 @@ def audit_paths(project_dir: Path, start: int, end: int) -> Dict[str, Path]:
     }
 
 
+def split_audit_range(start: int, end: int) -> List[Tuple[int, int]]:
+    if start >= end:
+        return []
+    mid = (start + end) // 2
+    return [(start, mid), (mid + 1, end)]
+
+
+def audit_range_label(start: int, end: int) -> str:
+    return f"{start:03d}-{end:03d}"
+
+
+def audit_child_ranges_from_status(data: Dict[str, Any]) -> List[Tuple[int, int]]:
+    ranges: List[Tuple[int, int]] = []
+    raw_ranges = data.get("child_ranges", [])
+    if not isinstance(raw_ranges, list):
+        return ranges
+    for item in raw_ranges:
+        if not isinstance(item, dict):
+            continue
+        try:
+            child_start = int(item.get("start"))
+            child_end = int(item.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if child_start > 0 and child_end >= child_start:
+            ranges.append((child_start, child_end))
+    return ranges
+
+
+def audit_status(project_dir: Path, start: int, end: int) -> Dict[str, Any]:
+    paths = audit_paths(project_dir, start, end)
+    data = load_json(paths["status"], {}) if paths["status"].is_file() else {}
+    return data if isinstance(data, dict) else {}
+
+
+def audit_range_is_resolved(project_dir: Path, start: int, end: int) -> bool:
+    return audit_status(project_dir, start, end).get("status") in AUDIT_RESOLVED_STATUSES
+
+
+def audit_children_resolved(project_dir: Path, child_ranges: List[Tuple[int, int]]) -> bool:
+    return bool(child_ranges) and all(audit_range_is_resolved(project_dir, s, e) for s, e in child_ranges)
+
+
+def mark_audit_covered_by_children(project_dir: Path, start: int, end: int, child_ranges: List[Tuple[int, int]]) -> None:
+    paths = audit_paths(project_dir, start, end)
+    update_audit_status(
+        paths,
+        status="covered_by_children",
+        range=audit_range_label(start, end),
+        child_ranges=[
+            {
+                "start": child_start,
+                "end": child_end,
+                "range": audit_range_label(child_start, child_end),
+            }
+            for child_start, child_end in child_ranges
+        ],
+        covered_at=datetime.now().isoformat(),
+        action="父周期审计已由全部子区间真实审计补丁覆盖；恢复时只重放子区间 correction。",
+    )
+
+
 def read_excerpt(path: Path, limit: int = 12000) -> str:
     if not path.is_file():
         return f"[缺失] {path}"
@@ -830,7 +1169,7 @@ def unresolved_audits(project_dir: Path) -> List[Dict[str, Any]]:
     audits = []
     for path in sorted(audit_dir.glob("audit_*.status.json")):
         data = load_json(path, None)
-        if isinstance(data, dict) and data.get("status") != "committed":
+        if isinstance(data, dict) and data.get("status") not in AUDIT_RESOLVED_STATUSES:
             data["_status_path"] = str(path)
             m = re.match(r"^(\d{3})-(\d{3})$", str(data.get("range", "")))
             if m:
@@ -896,6 +1235,94 @@ def update_audit_status(paths: Dict[str, Path], **updates: Any) -> None:
     save_json(paths["status"], data)
 
 
+def run_child_periodic_governance(
+    project_dir: Path,
+    start: int,
+    end: int,
+    child_ranges: List[Tuple[int, int]],
+    max_context_chars: int,
+    audit_command: str,
+    worker_timeout_seconds: int,
+    worker_retries: int,
+    worker_window: str,
+) -> int:
+    if audit_children_resolved(project_dir, child_ranges):
+        mark_audit_covered_by_children(project_dir, start, end, child_ranges)
+        print(f"周期审计 {start:03d}-{end:03d} 已由子区间覆盖完成。")
+        return 0
+
+    for child_start, child_end in child_ranges:
+        if audit_range_is_resolved(project_dir, child_start, child_end):
+            continue
+        rc = run_periodic_governance(
+            project_dir,
+            child_start,
+            child_end,
+            max_context_chars=max_context_chars,
+            audit_command=audit_command,
+            worker_timeout_seconds=worker_timeout_seconds,
+            worker_retries=worker_retries,
+            worker_window=worker_window,
+        )
+        if rc != 0:
+            return rc
+
+    if audit_children_resolved(project_dir, child_ranges):
+        mark_audit_covered_by_children(project_dir, start, end, child_ranges)
+        print(f"周期审计 {start:03d}-{end:03d} 已由子区间覆盖完成。")
+        return 0
+    return 2
+
+
+def prepare_audit_pack_or_split(
+    project_dir: Path,
+    start: int,
+    end: int,
+    force: bool = False,
+    max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+) -> int:
+    paths = audit_paths(project_dir, start, end)
+    pack = write_audit_pack(project_dir, start, end, force=force, max_context_chars=max_context_chars)
+    if pack is not None:
+        return 0
+
+    child_ranges = split_audit_range(start, end)
+    if not child_ranges:
+        return 1
+
+    update_audit_status(
+        paths,
+        status="split_pending",
+        range=audit_range_label(start, end),
+        child_ranges=[
+            {
+                "start": child_start,
+                "end": child_end,
+                "range": audit_range_label(child_start, child_end),
+            }
+            for child_start, child_end in child_ranges
+        ],
+        action="父周期审计包超出上下文预算，已自动拆分为子区间；子区间全部提交后父区间自动视为覆盖完成。",
+    )
+    print(
+        f"周期审计 {start:03d}-{end:03d} 上下文超限，自动拆分为: "
+        + ", ".join(audit_range_label(s, e) for s, e in child_ranges)
+    )
+
+    rc = 0
+    for child_start, child_end in child_ranges:
+        child_rc = prepare_audit_pack_or_split(
+            project_dir,
+            child_start,
+            child_end,
+            force=force,
+            max_context_chars=max_context_chars,
+        )
+        if child_rc != 0:
+            rc = child_rc
+    return rc
+
+
 def run_periodic_governance(
     project_dir: Path,
     start: int,
@@ -903,11 +1330,59 @@ def run_periodic_governance(
     max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
     audit_command: str = "",
     worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
-    worker_retries: int = 0,
+    worker_retries: int = DEFAULT_WORKER_RETRIES,
+    worker_window: str = DEFAULT_WORKER_WINDOW,
 ) -> int:
     paths = audit_paths(project_dir, start, end)
+    existing_status = load_json(paths["status"], {}) if paths["status"].is_file() else {}
+    existing_status = existing_status if isinstance(existing_status, dict) else {}
+    child_ranges = audit_child_ranges_from_status(existing_status)
+    if child_ranges:
+        return run_child_periodic_governance(
+            project_dir,
+            start,
+            end,
+            child_ranges,
+            max_context_chars,
+            audit_command,
+            worker_timeout_seconds,
+            worker_retries,
+            worker_window,
+        )
+
     pack = write_audit_pack(project_dir, start, end, max_context_chars=max_context_chars)
     if pack is None:
+        child_ranges = split_audit_range(start, end)
+        if child_ranges:
+            update_audit_status(
+                paths,
+                status="split_pending",
+                range=audit_range_label(start, end),
+                child_ranges=[
+                    {
+                        "start": child_start,
+                        "end": child_end,
+                        "range": audit_range_label(child_start, child_end),
+                    }
+                    for child_start, child_end in child_ranges
+                ],
+                action="父周期审计包超出上下文预算，已自动拆分为子区间；子区间全部提交后父区间自动视为覆盖完成。",
+            )
+            print(
+                f"周期审计 {start:03d}-{end:03d} 上下文超限，自动拆分为: "
+                + ", ".join(audit_range_label(s, e) for s, e in child_ranges)
+            )
+            return run_child_periodic_governance(
+                project_dir,
+                start,
+                end,
+                child_ranges,
+                max_context_chars,
+                audit_command,
+                worker_timeout_seconds,
+                worker_retries,
+                worker_window,
+            )
         return 1
     for attempt in range(worker_retries + 1):
         if not paths["correction"].is_file() or paths["correction"].stat().st_size == 0:
@@ -928,6 +1403,7 @@ def run_periodic_governance(
                 paths["correction"],
                 timeout=worker_timeout_seconds,
                 retries=0,
+                worker_window=worker_window,
             )
             if rc != 0:
                 update_audit_status(paths, status="worker_failed", action="审计 worker 失败；查看 worker 日志后重试。")
@@ -954,6 +1430,7 @@ def run_periodic_governance(
             paths["correction"],
             timeout=worker_timeout_seconds,
             retries=0,
+            worker_window=worker_window,
         )
         if rc != 0:
             update_audit_status(paths, status="worker_failed", action="审计修复 worker 失败；查看 worker 日志后重试。")
@@ -1262,7 +1739,8 @@ def cmd_run_analysis(
     project_dir: Path,
     chapter_command: str = "",
     worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
-    worker_retries: int = 0,
+    worker_retries: int = DEFAULT_WORKER_RETRIES,
+    worker_window: str = DEFAULT_WORKER_WINDOW,
 ) -> int:
     """Create and validate every chapter-analysis MD without touching Delta flow."""
     init_dirs(project_dir)
@@ -1289,6 +1767,7 @@ def cmd_run_analysis(
                 seq_from_file(chapter),
                 timeout=worker_timeout_seconds,
                 retries=worker_retries,
+                worker_window=worker_window,
             )
             if rc != 0:
                 return rc
@@ -1308,6 +1787,7 @@ def cmd_run_analysis(
                 seq_from_file(chapter),
                 timeout=worker_timeout_seconds,
                 retries=worker_retries,
+                worker_window=worker_window,
             )
             if rc != 0:
                 return rc
@@ -1324,8 +1804,10 @@ def cmd_run_delta(
     audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
     chapter_command: str = "",
     audit_command: str = "",
+    run_mode: str = "auto",
     worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
-    worker_retries: int = 0,
+    worker_retries: int = DEFAULT_WORKER_RETRIES,
+    worker_window: str = DEFAULT_WORKER_WINDOW,
 ) -> int:
     """Require all chapter analyses before entering the existing serial Delta flow."""
     init_dirs(project_dir)
@@ -1352,6 +1834,7 @@ def cmd_run_delta(
                 seq_from_file(chapter),
                 timeout=worker_timeout_seconds,
                 retries=worker_retries,
+                worker_window=worker_window,
             )
             if rc != 0:
                 return rc
@@ -1371,6 +1854,7 @@ def cmd_run_delta(
                 seq_from_file(chapter),
                 timeout=worker_timeout_seconds,
                 retries=worker_retries,
+                worker_window=worker_window,
             )
             if rc != 0:
                 return rc
@@ -1383,8 +1867,11 @@ def cmd_run_delta(
         audit_max_context_chars=audit_max_context_chars,
         chapter_command=chapter_command,
         audit_command=audit_command,
+        run_mode=run_mode,
+        worker_provider="manual",
         worker_timeout_seconds=worker_timeout_seconds,
         worker_retries=worker_retries,
+        worker_window=worker_window,
     )
 
 
@@ -1396,15 +1883,22 @@ def cmd_run(
     audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
     chapter_command: str = "",
     audit_command: str = "",
+    run_mode: str = "auto",
+    worker_provider: str = "manual",
     worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
-    worker_retries: int = 0,
+    worker_retries: int = DEFAULT_WORKER_RETRIES,
+    worker_window: str = DEFAULT_WORKER_WINDOW,
 ) -> int:
+    mode = effective_run_mode(run_mode, chapter_command, audit_command, worker_provider)
+    chapter_command, audit_command = resolve_worker_commands(chapter_command, audit_command, worker_provider, mode)
+    print(f"run route: mode={mode} worker_provider={worker_provider}")
     if phase == "analysis":
         return cmd_run_analysis(
             project_dir,
             chapter_command=chapter_command,
             worker_timeout_seconds=worker_timeout_seconds,
             worker_retries=worker_retries,
+            worker_window=worker_window,
         )
     if phase == "delta":
         return cmd_run_delta(
@@ -1414,8 +1908,10 @@ def cmd_run(
             audit_max_context_chars=audit_max_context_chars,
             chapter_command=chapter_command,
             audit_command=audit_command,
+            run_mode=mode,
             worker_timeout_seconds=worker_timeout_seconds,
             worker_retries=worker_retries,
+            worker_window=worker_window,
         )
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
@@ -1430,6 +1926,7 @@ def cmd_run(
             audit_command=audit_command,
             worker_timeout_seconds=worker_timeout_seconds,
             worker_retries=worker_retries,
+            worker_window=worker_window,
         )
         if rc != 0:
             return rc
@@ -1455,6 +1952,7 @@ def cmd_run(
                 seq,
                 timeout=worker_timeout_seconds,
                 retries=worker_retries,
+                worker_window=worker_window,
             )
             if rc != 0:
                 return rc
@@ -1476,6 +1974,7 @@ def cmd_run(
                     seq,
                     timeout=worker_timeout_seconds,
                     retries=worker_retries,
+                    worker_window=worker_window,
                 )
                 if rc != 0:
                     return rc
@@ -1492,6 +1991,7 @@ def cmd_run(
                 seq,
                 timeout=worker_timeout_seconds,
                 retries=worker_retries,
+                worker_window=worker_window,
             )
             if rc != 0:
                 return rc
@@ -1508,6 +2008,7 @@ def cmd_run(
                     seq,
                     timeout=worker_timeout_seconds,
                     retries=worker_retries,
+                    worker_window=worker_window,
                 )
                 if worker_rc != 0:
                     return worker_rc
@@ -1524,6 +2025,7 @@ def cmd_run(
                 audit_command=audit_command,
                 worker_timeout_seconds=worker_timeout_seconds,
                 worker_retries=worker_retries,
+                worker_window=worker_window,
             )
             if rc != 0:
                 return rc
@@ -1777,8 +2279,7 @@ def cmd_audit_pack(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(exc)
         return 1
-    pack = write_audit_pack(project_dir, start, end, force=args.force, max_context_chars=args.max_context_chars)
-    return 0 if pack is not None else 1
+    return prepare_audit_pack_or_split(project_dir, start, end, force=args.force, max_context_chars=args.max_context_chars)
 
 def cmd_split(args: argparse.Namespace) -> int:
     project_dir = Path(args.project_dir)
@@ -1842,7 +2343,188 @@ def chapters_eligible_for_visual(project_dir: Path) -> List[int]:
     return result
 
 
+def chapter_structure_per_chapter_relpaths(seq: int) -> List[str]:
+    base = f"全书分析/故事结构/分章/ch{seq:03d}"
+    return [f"{base}/章节结构.md"]
+
+
+def per_chapter_analysis_relpaths(task: str, seq: int) -> List[str]:
+    if task == "visual_assets":
+        return visual_assets_per_chapter_relpaths(seq)
+    if task == "chapter_structure":
+        return chapter_structure_per_chapter_relpaths(seq)
+    raise ValueError(f"unsupported per-chapter analysis task: {task}")
+
+
+def chapter_has_per_chapter_analysis(project_dir: Path, task: str, seq: int) -> bool:
+    for rel in per_chapter_analysis_relpaths(task, seq):
+        path = project_dir / rel
+        if not (path.is_file() and path.stat().st_size > 0):
+            return False
+    return True
+
+
+def resolve_analysis_worker_command(worker_command: str, worker_provider: str, run_mode: str) -> Tuple[str, str]:
+    mode = effective_run_mode(run_mode, worker_command, "", worker_provider)
+    if mode != "worker":
+        return mode, ""
+    if worker_command:
+        return mode, worker_command
+    if not worker_provider or worker_provider == "manual":
+        return mode, ""
+    return mode, builtin_agent_worker_command(worker_provider)
+
+
+def task_package_root(project_dir: Path) -> Path:
+    return project_dir / "全书分析" / "_任务包"
+
+
+def latest_analysis_manifest(project_dir: Path, suffix: str) -> Optional[Path]:
+    root = task_package_root(project_dir)
+    candidates = [path / "manifest.json" for path in root.glob(f"*_{suffix}") if (path / "manifest.json").is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def write_analysis_worker_pack(project_dir: Path, manifest_path: Path, record: Dict[str, Any]) -> Path:
+    parts: List[str] = []
+    for key in ("pack", "inventory", "reduce_prompt"):
+        rel = record.get(key)
+        if not rel:
+            continue
+        path = project_dir / rel
+        if path.is_file():
+            parts.append(f"# {key}: {rel}\n\n{path.read_text(encoding='utf-8', errors='ignore')}")
+    if not parts:
+        raise ValueError(f"manifest record has no readable task material: {manifest_path}")
+    seq = record.get("seq")
+    name = f"worker_pack_ch{int(seq):03d}.md" if isinstance(seq, int) else "worker_pack.md"
+    out = manifest_path.parent / name
+    out.write_text("\n\n".join(parts), encoding="utf-8")
+    return out
+
+
+def run_analysis_context_pack_for_auto(args: argparse.Namespace, task: str, seq: int = 0, aggregate: bool = False) -> int:
+    project_dir = Path(args.project_dir)
+    cmd = [
+        sys.executable,
+        str(script_path("analysis_context_pack.py")),
+        str(project_dir),
+        "--task", task,
+    ]
+    if aggregate:
+        cmd.append("--aggregate")
+    else:
+        cmd.extend([
+            "--chapters", str(seq),
+            "--per-chapter",
+            "--include-original", args.include_original,
+            "--max-pack-chars", str(args.max_pack_chars),
+            "--max-original-chars", str(args.max_original_chars),
+            "--max-analysis-chars", str(args.max_analysis_chars),
+        ])
+    return run_cmd(cmd)
+
+
+def load_latest_pack_record(project_dir: Path, suffix: str, seq: int = 0) -> Tuple[Path, Dict[str, Any]]:
+    manifest_path = latest_analysis_manifest(project_dir, suffix)
+    if manifest_path is None:
+        raise FileNotFoundError(f"no analysis manifest found for {suffix}")
+    manifest = load_json(manifest_path, {})
+    if seq:
+        for record in manifest.get("packs", []):
+            if isinstance(record, dict) and int(record.get("seq", 0) or 0) == seq:
+                return manifest_path, record
+        raise FileNotFoundError(f"manifest has no pack record for ch{seq:03d}: {manifest_path}")
+    return manifest_path, manifest
+
+
+def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
+    project_dir = Path(args.project_dir)
+    init_dirs(project_dir)
+    mode, worker_command = resolve_analysis_worker_command(
+        getattr(args, "worker_command", ""),
+        getattr(args, "worker_provider", "manual"),
+        getattr(args, "run_mode", "auto"),
+    )
+    print(f"{task} route: mode={mode} worker_provider={getattr(args, 'worker_provider', 'manual')}")
+    eligible = chapters_eligible_for_visual(project_dir)
+    if not eligible:
+        print("尚无任何章节具备章节分析MD；请先完成章节分析后再运行分章分析自动流程。")
+        return 1
+
+    suffix = f"{task}_per_chapter"
+    while True:
+        pending = [seq for seq in eligible if not chapter_has_per_chapter_analysis(project_dir, task, seq)]
+        if not pending:
+            break
+        next_seq = pending[0]
+        rc = run_analysis_context_pack_for_auto(args, task, seq=next_seq)
+        if rc != 0:
+            return rc
+        manifest_path, record = load_latest_pack_record(project_dir, suffix, next_seq)
+        expected_outputs = [project_dir / rel for rel in record.get("outputs", [])]
+        task_pack = write_analysis_worker_pack(project_dir, manifest_path, record)
+        remaining = len(pending) - 1
+        print(f"generated {task} task pack for ch{next_seq:03d}; remaining chapters: {remaining}")
+        if not worker_command:
+            print("handoff: complete the task pack, write expected artifact(s), then rerun the same command.")
+            return 2
+        rc = run_multi_output_worker(
+            worker_command,
+            project_dir,
+            task,
+            task_pack,
+            expected_outputs,
+            next_seq,
+            timeout=getattr(args, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS),
+            retries=getattr(args, "worker_retries", DEFAULT_WORKER_RETRIES),
+            worker_window=getattr(args, "worker_window", DEFAULT_WORKER_WINDOW),
+        )
+        if rc != 0:
+            return rc
+
+    if task != "visual_assets":
+        print(f"all per-chapter {task} artifacts are complete.")
+        return 0
+
+    aggregate_marker = project_dir / "全书分析" / "视觉资产" / "视觉资产清单.md"
+    if aggregate_marker.is_file() and aggregate_marker.stat().st_size > 0 and not getattr(args, "force_aggregate", False):
+        print("all per-chapter visual assets and top-level aggregate already exist.")
+        return 0
+    rc = run_analysis_context_pack_for_auto(args, "visual_assets", aggregate=True)
+    if rc != 0:
+        return rc
+    manifest_path, record = load_latest_pack_record(project_dir, "visual_assets_aggregate")
+    expected_outputs = [project_dir / rel for rel in record.get("target_outputs", [])]
+    task_pack = write_analysis_worker_pack(project_dir, manifest_path, record)
+    print("generated visual_assets aggregate task pack.")
+    if not worker_command:
+        print("handoff: complete the aggregate task pack, write top-level artifact(s), then rerun the same command.")
+        return 2
+    return run_multi_output_worker(
+        worker_command,
+        project_dir,
+        "visual_assets_aggregate",
+        task_pack,
+        expected_outputs,
+        0,
+        timeout=getattr(args, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS),
+        retries=getattr(args, "worker_retries", DEFAULT_WORKER_RETRIES),
+        worker_window=getattr(args, "worker_window", DEFAULT_WORKER_WINDOW),
+    )
+
+
 def cmd_visual_assets_auto(args: argparse.Namespace) -> int:
+    return cmd_per_chapter_analysis_auto(args, "visual_assets")
+
+
+def cmd_chapter_structure_auto(args: argparse.Namespace) -> int:
+    return cmd_per_chapter_analysis_auto(args, "chapter_structure")
+
+
+def cmd_visual_assets_auto_legacy(args: argparse.Namespace) -> int:
     """按章自主推进视觉资产生成；遇到缺产物的章节返回 2 等主控Agent写入。"""
     project_dir = Path(args.project_dir)
     init_dirs(project_dir)
@@ -1956,12 +2638,16 @@ def main() -> int:
     p_run.add_argument("--audit-interval", type=int, default=5, help="每N章执行一次自动周期治理；0表示关闭")
     p_run.add_argument("--audit-max-context-chars", type=positive_int, default=DEFAULT_AUDIT_MAX_CONTEXT_CHARS, help="周期审计单包最大字符数；默认按256k上下文模型预留输出和安全余量")
     p_run.add_argument("--phase", choices=["auto", "analysis", "delta"], default="auto", help="运行阶段：auto=旧逐章流程；analysis=只循环生成/校验章节分析MD；delta=先要求全部MD合格，再循环生成/提交结构JSON")
+    p_run.add_argument("--run-mode", choices=RUN_MODES, default="auto", help="routing mode: subagent=main agent dispatches a child agent, serial=main agent handles return-2 task packs then reruns, worker=external CLI worker, auto=worker when configured otherwise subagent")
     p_run.add_argument("--chapter-command", default="", help="外部章节 worker 命令；由 run 传入当前任务包并验收章节分析/Delta/修复产物")
     p_run.add_argument("--audit-command", default="", help="外部审计 worker 命令；由 run 传入周期审计任务包并验收 correction 产物")
+    p_run.add_argument("--worker-provider", choices=WORKER_PROVIDERS, default="manual", help="built-in worker provider; only used by --run-mode worker or auto worker routing")
     p_run.add_argument("--worker-timeout-seconds", type=positive_int, default=DEFAULT_WORKER_TIMEOUT_SECONDS, help="单次外部 worker 命令超时秒数")
-    p_run.add_argument("--worker-retries", type=non_negative_int, default=0, help="外部 worker 失败或未写出产物后的重试次数")
+    p_run.add_argument("--worker-retries", type=non_negative_int, default=DEFAULT_WORKER_RETRIES, help="外部 worker 失败或未写出产物后的重试次数；默认 2，表示总共执行 3 次")
 
     p_resume = sub.add_parser("resume", help="查看下一步缺什么")
+    p_run.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: powershell=visible auto-close window by default, hidden=current terminal/log, powershell-keep=visible window waits for Enter")
+
     p_resume.add_argument("project_dir")
 
     p_recover = sub.add_parser("recover-story", help="从 story_after_chNNN 快照恢复过程库，并重放后续Delta")
@@ -2014,6 +2700,28 @@ def main() -> int:
     p_vauto.add_argument("--max-analysis-chars", type=int, default=12000)
     p_vauto.add_argument("--force-aggregate", action="store_true", help="即便顶层汇总已存在，也重新生成 aggregate 任务包")
 
+    p_vauto.add_argument("--run-mode", choices=RUN_MODES, default="auto", help="routing mode: subagent, serial, worker, or auto")
+    p_vauto.add_argument("--worker-provider", choices=WORKER_PROVIDERS, default="manual", help="built-in worker provider for worker route")
+    p_vauto.add_argument("--worker-command", default="", help="external multi-output analysis worker command")
+    p_vauto.add_argument("--worker-timeout-seconds", type=positive_int, default=DEFAULT_WORKER_TIMEOUT_SECONDS)
+    p_vauto.add_argument("--worker-retries", type=non_negative_int, default=DEFAULT_WORKER_RETRIES)
+
+    p_sauto = sub.add_parser("chapter-structure-auto", help="按章自主推进故事结构章节结构生成")
+    p_vauto.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: powershell by default, hidden, or powershell-keep")
+
+    p_sauto.add_argument("project_dir")
+    p_sauto.add_argument("--include-original", choices=["none", "sample", "full"], default="sample")
+    p_sauto.add_argument("--max-pack-chars", type=int, default=70000)
+    p_sauto.add_argument("--max-original-chars", type=int, default=6000)
+    p_sauto.add_argument("--max-analysis-chars", type=int, default=12000)
+    p_sauto.add_argument("--force-aggregate", action="store_true", help=argparse.SUPPRESS)
+    p_sauto.add_argument("--run-mode", choices=RUN_MODES, default="auto", help="routing mode: subagent, serial, worker, or auto")
+    p_sauto.add_argument("--worker-provider", choices=WORKER_PROVIDERS, default="manual", help="built-in worker provider for worker route")
+    p_sauto.add_argument("--worker-command", default="", help="external multi-output analysis worker command")
+    p_sauto.add_argument("--worker-timeout-seconds", type=positive_int, default=DEFAULT_WORKER_TIMEOUT_SECONDS)
+    p_sauto.add_argument("--worker-retries", type=non_negative_int, default=DEFAULT_WORKER_RETRIES)
+    p_sauto.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: powershell by default, hidden, or powershell-keep")
+
     p_fpack = sub.add_parser("final-pack", help="生成最终结构整理任务包（复制增量为草稿+校验+打包参考材料）")
     p_fpack.add_argument("project_dir")
     p_fpack.add_argument("--force", action="store_true", help="强制重新从增量复制草稿")
@@ -2048,8 +2756,11 @@ def main() -> int:
             audit_max_context_chars=args.audit_max_context_chars,
             chapter_command=args.chapter_command,
             audit_command=args.audit_command,
+            run_mode=args.run_mode,
+            worker_provider=args.worker_provider,
             worker_timeout_seconds=args.worker_timeout_seconds,
             worker_retries=args.worker_retries,
+            worker_window=args.worker_window,
         )
     if args.cmd == "resume":
         return cmd_resume(project_dir)
@@ -2069,6 +2780,8 @@ def main() -> int:
         return cmd_analysis_status(args)
     if args.cmd == "visual-assets-auto":
         return cmd_visual_assets_auto(args)
+    if args.cmd == "chapter-structure-auto":
+        return cmd_chapter_structure_auto(args)
     if args.cmd == "final-pack":
         return cmd_final_pack(project_dir, getattr(args, "force", False))
     if args.cmd == "commit-final-draft":

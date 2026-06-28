@@ -24,6 +24,15 @@ from typing import Any, Dict, List, Tuple
 from story_schema_rules import COLLECTION_KEYS, validate_exact_story_schema
 
 
+def configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+configure_stdio()
+
+
 def load_json(path: str) -> Any:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)

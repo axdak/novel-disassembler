@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent / "scripts"
 RUNNER = ROOT / "run_pipeline.py"
 sys.path.insert(0, str(ROOT))
 
-from run_pipeline import cmd_run, commit_governance, write_audit_pack
+from run_pipeline import cmd_run, commit_governance, prepare_audit_pack_or_split, write_audit_pack
 
 
 def write_json(path, data):
@@ -208,6 +208,31 @@ def test_audit_pack_blocks_instead_of_truncating_current_evidence_when_context_o
         assert not (project / "质量治理" / "周期审计" / "audit_001-001.md").exists()
 
 
+def test_audit_pack_splits_multi_chapter_overflow_into_child_packs():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        for seq in range(1, 6):
+            chapter = write_completed_chapter(project, seq)
+            chapter.write_text(f"# 第{seq:03d}章\n" + ("当前周期证据" * 1200), encoding="utf-8")
+
+        rc = prepare_audit_pack_or_split(project, 1, 5, max_context_chars=25000)
+
+        assert rc == 0
+        audit_dir = project / "质量治理" / "周期审计"
+        parent = load_status(audit_dir / "audit_001-005.status.json")
+        assert parent["status"] == "split_pending"
+        child_ranges = {item["range"] for item in parent["child_ranges"]}
+        assert child_ranges == {"001-003", "004-005"}
+        mid = load_status(audit_dir / "audit_001-003.status.json")
+        assert mid["status"] == "split_pending"
+        assert {item["range"] for item in mid["child_ranges"]} == {"001-002", "003-003"}
+        assert (audit_dir / "audit_001-002.md").is_file()
+        assert (audit_dir / "audit_003-003.md").is_file()
+        assert (audit_dir / "audit_004-005.md").is_file()
+        assert not (audit_dir / "audit_001-005.md").exists()
+
+
 def test_run_hands_periodic_audit_to_agent_then_continues_after_real_patch():
     with tempfile.TemporaryDirectory() as td:
         project = Path(td) / "拆书_测试"
@@ -286,11 +311,74 @@ output.write_text(json.dumps({
             encoding="utf-8",
         )
 
-        rc = cmd_run(project, audit_command=f'"{sys.executable}" "{worker}"')
+        rc = cmd_run(project, audit_command=f'"{sys.executable}" "{worker}"', worker_window="hidden")
 
         assert rc == 0
         status = project / "质量治理" / "周期审计" / "audit_001-005.status.json"
         assert load_status(status)["status"] == "committed"
+        assert (project / "故事结构版本" / "story_after_ch006.json").is_file()
+
+
+def test_run_auto_splits_periodic_audit_and_continues_after_child_patches():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "拆书_测试"
+        write_json(project / "故事结构_增量.json", empty_story())
+        for seq in range(1, 5):
+            chapter = write_completed_chapter(project, seq)
+            chapter.write_text(f"# 第{seq:03d}章\n" + ("当前周期证据" * 1200), encoding="utf-8")
+        ch5 = write_chapter_source(project, 5)
+        ch5.write_text("# 第005章\n" + ("当前周期证据" * 1200), encoding="utf-8")
+        (project / "章节处理" / "第005章_测试.md").write_text(valid_analysis(5), encoding="utf-8")
+        write_json(project / "章节处理" / "第005章_测试.json", empty_delta(5))
+        write_chapter_source(project, 6)
+        (project / "章节处理" / "第006章_测试.md").write_text(valid_analysis(6), encoding="utf-8")
+        write_json(project / "章节处理" / "第006章_测试.json", empty_delta(6))
+
+        worker = root / "split_audit_worker.py"
+        worker.write_text(
+            """
+import json
+import os
+import re
+from pathlib import Path
+
+output = Path(os.environ["ND_EXPECTED_OUTPUT"])
+match = re.match(r"correction_(\\d{3})-(\\d{3})\\.json", output.name)
+if not match:
+    raise SystemExit(f"unexpected output: {output}")
+start, end = match.groups()
+chapters = [f"第{seq:03d}章" for seq in range(int(start), int(end) + 1)]
+empty = {"角色集": [], "事件集": [], "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []}
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps({
+    "章节范围": f"第{start}章-第{end}章",
+    "治理类型": "no_change",
+    "质量说明": "已检查本子区间角色、事件、地点、线索、阵营、物品，无需合并或降级。",
+    "证据范围": chapters,
+    "新增元素": empty,
+    "修改元素": empty,
+}, ensure_ascii=False, indent=2), encoding="utf-8")
+""",
+            encoding="utf-8",
+        )
+
+        rc = cmd_run(
+            project,
+            audit_max_context_chars=25000,
+            audit_command=f'"{sys.executable}" "{worker}"',
+            worker_window="hidden",
+        )
+
+        assert rc == 0
+        audit_dir = project / "质量治理" / "周期审计"
+        parent = load_status(audit_dir / "audit_001-005.status.json")
+        assert parent["status"] == "covered_by_children"
+        assert {item["range"] for item in parent["child_ranges"]} == {"001-003", "004-005"}
+        assert load_status(audit_dir / "audit_001-003.status.json")["status"] == "covered_by_children"
+        assert load_status(audit_dir / "audit_001-002.status.json")["status"] == "committed"
+        assert load_status(audit_dir / "audit_003-003.status.json")["status"] == "committed"
+        assert load_status(audit_dir / "audit_004-005.status.json")["status"] == "committed"
         assert (project / "故事结构版本" / "story_after_ch006.json").is_file()
 
 

@@ -25,6 +25,15 @@ from story_schema_rules import (
 )
 from chronology import BASE_TIME, chapter_time, first_involved_chapter, is_iso_time, normalize_chapter_value, normalize_involved_chapters
 
+
+def configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
+configure_stdio()
+
 REQUIRED_TOP_KEYS = {"新增元素", "修改元素"}
 OPTIONAL_TOP_KEYS = {"章节", "章节范围", "介绍", "冲突声明", "质量说明", "处理备注", "治理操作", "待人工确认", "证据范围", "治理类型", "治理目标"}
 ALLOWED_TOP_KEYS = REQUIRED_TOP_KEYS | OPTIONAL_TOP_KEYS
@@ -148,7 +157,7 @@ def issue_ref(
         return
     msg = f"{label}.{field} 引用了不存在的{COLLECTION_TO_TYPE[target]}[{clean}]"
     if mode == "process":
-        warnings.append(msg + "；过程阶段允许作为前向引用，但最终前必须补齐或移入详情.待确认信息")
+        warnings.append(msg + "；过程阶段允许作为前向引用，但最终前必须显式新增/合并目标或移入详情.关系线索/待确认信息")
     elif mode == "governance" and soft_governance:
         warnings.append(msg + "；治理阶段允许事件发生地点保留细粒度子空间，最终交付前建议收敛为已注册父级地点或正式地点")
     else:

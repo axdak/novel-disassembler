@@ -46,14 +46,16 @@ python scripts/run_pipeline.py analysis-pack <项目目录> --task visual_assets
 python scripts/run_pipeline.py analysis-pack <项目目录> --task visual_assets --aggregate
 ```
 
-自动按章顺序推进（推荐；和 run_pipeline.py run 一样的返回 2 自主循环模式）：
+自动按章顺序推进（推荐；和 `run_pipeline.py run` 一样支持三种路由）：
 
 ```bash
-python scripts/run_pipeline.py visual-assets-auto <项目目录>
-# 每次返回 2 交接一章；主控Agent按 reduce_prompt 写完 分章/chNNN/ 五件套后再次运行
-# 所有 eligible 章节完成后自动切到 aggregate，再返回 2 交接顶层汇总写入
-# 顶层汇总写完后返回 0 表示流程完成
+python scripts/run_pipeline.py visual-assets-auto <项目目录> --run-mode subagent
+python scripts/run_pipeline.py visual-assets-auto <项目目录> --run-mode serial
+python scripts/run_pipeline.py visual-assets-auto <项目目录> --run-mode worker --worker-provider auto
+python scripts/run_pipeline.py visual-assets-auto <项目目录> --run-mode worker --worker-command "python tools/agent_worker.py --provider codebuddy"
 ```
+
+`subagent` 返回 2 后由主Agent派发子Agent完成当前分章/aggregate任务包；`serial` 返回 2 后主Agent亲自写当前目标产物并立刻重跑；`worker` 会在终端显示 worker 调用，验收分章五件套和顶层五件套，完成后返回 0。
 
 ### chapter_structure 分章生成
 
@@ -69,6 +71,17 @@ python scripts/run_pipeline.py analysis-pack <项目目录> --task chapter_struc
 # 全书
 python scripts/run_pipeline.py analysis-pack <项目目录> --task chapter_structure --chapters all --per-chapter
 ```
+
+自动按章顺序推进章节结构，同样支持三种路由：
+
+```bash
+python scripts/run_pipeline.py chapter-structure-auto <项目目录> --run-mode subagent
+python scripts/run_pipeline.py chapter-structure-auto <项目目录> --run-mode serial
+python scripts/run_pipeline.py chapter-structure-auto <项目目录> --run-mode worker --worker-provider auto
+python scripts/run_pipeline.py chapter-structure-auto <项目目录> --run-mode worker --worker-command "python tools/agent_worker.py --provider codebuddy"
+```
+
+`chapter-structure-auto` 每次只交接一个 `章节结构.md` 分章任务包；worker 路由会验收 `全书分析/故事结构/分章/chNNN/章节结构.md`，全部 eligible 章节完成后返回 0。
 
 ### narrative_structure 全书故事结构分析
 

@@ -38,7 +38,7 @@
 
 `已完成章节` 的含义：该章 MD、Delta、Delta校验、合并、章节级校验均已通过，且已保存 `story_after_chNNN.json` 快照。
 
-可选两阶段运行时，`run --phase analysis` 生成并校验全部章节分析 MD，但这些 MD 只表示“分析阶段可继续”，不计入 `已完成章节`，也不会生成 `story_after_chNNN.json`。`run --phase delta` 会先检查全部 MD 均通过现有章节分析校验，再进入原有 Delta、合并、快照与治理链。
+可选两阶段运行时，使用 `run <项目目录> --phase analysis --run-mode worker --worker-provider auto` 生成并校验全部章节分析 MD，但这些 MD 只表示“分析阶段可继续”，不计入 `已完成章节`，也不会生成 `story_after_chNNN.json`。随后使用 `run <项目目录> --phase delta --run-mode worker --worker-provider auto`，它会先检查全部 MD 均通过现有章节分析校验，再进入原有 Delta、合并、快照与治理链。
 
 ## 每章产物
 

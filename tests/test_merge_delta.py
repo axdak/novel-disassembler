@@ -25,6 +25,7 @@ from merge_delta import (
     merge_intro_string, merge_scalar_field, deep_merge_item,
     build_lookup_index, find_index, ensure_skeleton, TOPLEVEL_SKELETON,
 )
+from story_schema_rules import parse_supplementary_tags
 
 
 def _write(path, obj):
@@ -154,6 +155,40 @@ def test_detail_merge():
     # 仅一边有的键合并进来
     assert merge_detail_field({"a": "1"}, {"b": "2"}) == {"a": "1", "b": "2"}
     print("[OK] 详情字段键级合并")
+
+
+def test_cumulative_detail_fields_append_without_overwriting():
+    detail = merge_detail_field(
+        {"关系线索": '["父亲:郭巨侠；来源:第003章；目标角色未正式入库"]'},
+        {"关系线索": '["哥哥:莫小宝；来源:第003章；目标角色未正式入库"]'},
+    )
+    assert json.loads(detail["关系线索"]) == [
+        "父亲:郭巨侠；来源:第003章；目标角色未正式入库",
+        "哥哥:莫小宝；来源:第003章；目标角色未正式入库",
+    ]
+
+    unchanged = merge_detail_field(
+        {"待确认信息": '["父亲:郭巨侠；来源:第003章；目标角色未正式入库"]'},
+        {"待确认信息": '["父亲:郭巨侠；来源:第003章；目标角色未正式入库"]'},
+    )
+    assert json.loads(unchanged["待确认信息"]) == ["父亲:郭巨侠；来源:第003章；目标角色未正式入库"]
+
+    migrated = merge_detail_field(
+        {"待确认关系": "父亲:郭巨侠；来源:第003章\n哥哥:莫小宝；来源:第003章"},
+        {"待确认关系": '["父亲:郭巨侠；来源:第003章","嫂子:佟湘玉；来源:第004章"]'},
+    )
+    assert json.loads(migrated["待确认关系"]) == [
+        "父亲:郭巨侠；来源:第003章",
+        "哥哥:莫小宝；来源:第003章",
+        "嫂子:佟湘玉；来源:第004章",
+    ]
+
+    tags = merge_detail_field(
+        {"补充标签": '["人物类型:掌柜","喜剧包袱"]'},
+        {"补充标签": '["喜剧包袱","关系待确认"]'},
+    )
+    assert parse_supplementary_tags(tags["补充标签"]) == ["人物类型:掌柜", "喜剧包袱", "关系待确认"]
+    print("[OK] 累计型详情字段追加去重，不覆盖")
 
 
 def test_detail_reason_is_preserved_only_for_events_while_legacy_trace_is_not_merged():

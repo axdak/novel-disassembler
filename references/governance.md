@@ -23,7 +23,7 @@
 
 `audit-pack --max-context-chars` 和 `run --audit-max-context-chars` 可配置单包字符预算；默认 160000 字符，面向 256k 上下文模型预留补丁输出、系统提示和工具调用。它是模型无关的保守字符预算，不宣称等同于任意供应商的精确 Token 计数。
 
-若连历史结构降载后的单包仍超预算，状态文件写为 `blocked_context` 并返回失败；不得截断本周期原文、分析或 Delta，也不得用空补丁解除阻断。此时应提高预算、缩小 `--audit-interval`，或改用更大上下文模型后重新生成。
+若连历史结构降载后的单包仍超预算，不得截断本周期原文、分析或 Delta，也不得用空补丁解除阻断。多章周期会自动二分为连续子区间，并在父状态文件写入 `split_pending` 与 `child_ranges`；子区间全部通过真实 `correction_XXX.json` 提交后，父区间自动标记为 `covered_by_children`。只有单章证据仍超预算时，状态才保持 `blocked_context` 并返回失败；此时应提高预算或改用更大上下文模型后重新生成。
 
 ## 审计目标
 检查并修正：

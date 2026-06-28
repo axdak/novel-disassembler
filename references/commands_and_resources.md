@@ -6,33 +6,67 @@
 
 ```bash
 python <skill_path>/scripts/run_pipeline.py split <项目目录> <原文文件>
-python <skill_path>/scripts/run_pipeline.py run <项目目录>
+python <skill_path>/scripts/run_pipeline.py run <项目目录> --run-mode subagent
+python <skill_path>/scripts/run_pipeline.py run <项目目录> --run-mode serial
+python <skill_path>/scripts/run_pipeline.py run <项目目录> --run-mode worker --worker-provider auto
+```
+
+内置 CLI worker 自动选择模式：
+```bash
+python <skill_path>/scripts/run_pipeline.py run <项目目录> \
+  --run-mode worker \
+  --worker-provider auto \
+  --worker-timeout-seconds 1800 \
+  --worker-retries 2
+```
+
+`--run-mode subagent` 表示主Agent调度子Agent，`--run-mode serial` 表示主Agent在返回 `2` 后亲自完成任务包并立刻重跑，`--run-mode worker` 表示脚本调用外部 worker。`--worker-provider auto` 会优先选择 Agy；如果 Agy 不可用，再尝试 CodeBuddy。也可以显式指定：
+```bash
+python <skill_path>/scripts/run_pipeline.py run <项目目录> --run-mode worker --worker-provider agy
+python <skill_path>/scripts/run_pipeline.py run <项目目录> --run-mode worker --worker-provider codebuddy
 ```
 
 外部 worker 模式：
 ```bash
 python <skill_path>/scripts/run_pipeline.py run <项目目录> \
+  --run-mode worker \
   --chapter-command "<章节worker命令>" \
   --audit-command "<审计worker命令>" \
   --worker-timeout-seconds 1800 \
-  --worker-retries 1
+  --worker-retries 2
 ```
 
-内置通用 wrapper 可接 Claude Code 或 Antigravity CLI：
+内置通用 wrapper 可接 Antigravity CLI 或 CodeBuddy：
 ```bash
 python <skill_path>/scripts/run_pipeline.py run <项目目录> \
-  --chapter-command "python <skill_path>/tools/agent_worker.py --provider claude" \
-  --audit-command "python <skill_path>/tools/agent_worker.py --provider claude"
+  --run-mode worker \
+  --chapter-command "python <skill_path>/tools/agent_worker.py --provider codebuddy" \
+  --audit-command "python <skill_path>/tools/agent_worker.py --provider codebuddy"
 ```
 
-将 `--provider claude` 替换为 `--provider agy` 即可切换 provider。若 `agy.exe` 未加入 PATH，可在运行前设置：
+将 `--provider codebuddy` 替换为 `--provider agy` 或 `--provider auto` 即可切换 provider。若 `agy.exe` 未加入 PATH，wrapper 会优先尝试 `%LOCALAPPDATA%\agy\bin\agy.exe`；也可在运行前显式设置：
 ```powershell
 $env:ND_AGY_BIN = "C:\Users\53519\AppData\Local\agy\bin\agy.exe"
 ```
 
-也可通过 `ND_CLAUDE_BIN` 指定 CLI 完整路径，通过 `ND_AGENT_MODEL` 指定模型。
+也可通过 `ND_AGY_BIN`、`ND_CODEBUDDY_BIN` 指定 CLI 完整路径，通过 `ND_CODEBUDDY_ARGS` 追加 CodeBuddy 参数，通过 `ND_AGENT_MODEL` 指定模型，通过 `ND_AGENT_PROVIDER_ORDER` 调整 auto 顺序。
 
 worker 命令通过环境变量接收任务：
+在 Windows 上，`run`、`visual-assets-auto` 和 `chapter-structure-auto` 的外部 worker 默认使用：
+```powershell
+--worker-window powershell
+```
+脚本会为每个 worker 任务打开一个新的 PowerShell 窗口，worker 结束后窗口自动关闭；完整输出仍会写入项目的 `质量治理/worker日志/`。
+如果需要静默执行并只看当前终端/日志，可显式追加：
+```powershell
+--worker-window hidden
+```
+如果需要确认命令确实在弹出的窗口中执行，并查看退出码，可改用：
+```powershell
+--worker-window powershell-keep
+```
+该模式会在 worker 结束后停在 PowerShell 窗口中，按 Enter 后再关闭。
+
 ```text
 ND_TASK_TYPE=analysis | analysis_regenerate | delta | repair_chapter | audit_correction | audit_repair
 ND_PROJECT_DIR=<项目目录>
@@ -45,21 +79,40 @@ worker 必须只写 `ND_EXPECTED_OUTPUT` 指向的目标产物。`run_pipeline.p
 
 如果希望先批量完成所有章节分析 MD，再进入结构 JSON 阶段，可显式拆成两段运行：
 ```bash
-python <skill_path>/scripts/run_pipeline.py run <项目目录> --phase analysis
-python <skill_path>/scripts/run_pipeline.py run <项目目录> --phase delta
+python <skill_path>/scripts/run_pipeline.py run <项目目录> --phase analysis --run-mode worker --worker-provider auto
+python <skill_path>/scripts/run_pipeline.py run <项目目录> --phase delta --run-mode worker --worker-provider auto
 ```
 
 `--phase analysis` 只生成/校验章节分析 MD，不创建 Delta 任务、不提交故事结构、不触发周期治理；`--phase delta` 会先要求所有章节分析 MD 通过现有校验，然后沿用原有串行 Delta 提交、快照、回滚和周期治理链。未指定 `--phase` 时保持旧的逐章交错流程。
 
-返回 `2` 后，主控Agent必须根据当前阶段任务包立即产出：
+视觉资产分章和故事结构章节分析也使用同一套路由：
+```bash
+python <skill_path>/scripts/run_pipeline.py visual-assets-auto <项目目录> --run-mode subagent
+python <skill_path>/scripts/run_pipeline.py visual-assets-auto <项目目录> --run-mode serial
+python <skill_path>/scripts/run_pipeline.py visual-assets-auto <项目目录> --run-mode worker --worker-provider auto
+
+python <skill_path>/scripts/run_pipeline.py chapter-structure-auto <项目目录> --run-mode subagent
+python <skill_path>/scripts/run_pipeline.py chapter-structure-auto <项目目录> --run-mode serial
+python <skill_path>/scripts/run_pipeline.py chapter-structure-auto <项目目录> --run-mode worker --worker-provider auto
+```
+
+这两类命令的 `worker` 路由也可以显式指定多产物 worker：
+```bash
+python <skill_path>/scripts/run_pipeline.py visual-assets-auto <项目目录> --run-mode worker --worker-command "python <skill_path>/tools/agent_worker.py --provider codebuddy"
+python <skill_path>/scripts/run_pipeline.py chapter-structure-auto <项目目录> --run-mode worker --worker-command "python <skill_path>/tools/agent_worker.py --provider codebuddy"
+```
+
+未配置 worker 时，返回 `2` 后，主控Agent/人工必须根据当前阶段任务包立即产出：
 ```text
 task_chNNN_analysis.md -> 章节处理/第NNN章_xxx.md
 task_chNNN_delta.md -> 章节处理/第NNN章_xxx.json
 ```
 
+配置 `--run-mode worker` 加 `--worker-provider`、`--chapter-command` 或 `--audit-command` 后，返回 `2` 通常表示 worker 未能完成交接、缺少配置或期望产物未写出；此时主控Agent应查看 worker 日志和任务状态并重试同一条 worker 命令，不应在主会话中亲自写语义产物。`subagent` 和 `serial` 路由则分别由子Agent或主Agent按任务包产出后继续重跑。
+
 然后继续：
 ```bash
-python <skill_path>/scripts/run_pipeline.py run <项目目录>
+python <skill_path>/scripts/run_pipeline.py run <项目目录> --run-mode worker --worker-provider auto
 ```
 
 返回码、任务包优先级、周期审计的处理纪律见 `references/autonomous_loop.md`。
@@ -129,7 +182,7 @@ final-pack → 模型根据任务包修改草稿 → commit-final-draft
 **主控 & 进度**
 - `run_pipeline.py`：主控器，推进章节、生成任务包、提交章节/治理/最终交付；默认不调用大模型，配置外部 worker 后可自动交接当前任务包并验收产物。
 - `progress_manager.py`：进度管理脚本，初始化、查询、更新、断点恢复、摘要生成。
-- `tools/agent_worker.py`：外部 CLI worker wrapper，支持 `claude`、`agy` 两种 provider，把当前任务包转换为 headless prompt，并把 CLI stdout 写入期望产物。
+- `tools/agent_worker.py`：外部 CLI worker wrapper，支持 `auto`、`agy`、`codebuddy` provider，把当前任务包转换为 headless prompt；单产物任务把 CLI stdout 写入期望产物，多产物任务通过 `ND_EXPECTED_OUTPUTS` 要求 provider 直接写项目文件并由主控验收。
 
 **步骤 1：章节拆分**
 - `split_chapters.py`：章节拆分脚本，自动检测章节模式并拆分，支持 txt/docx。
