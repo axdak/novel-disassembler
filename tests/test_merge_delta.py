@@ -118,9 +118,9 @@ def test_alias_matching():
         assert "对峙" in wan["介绍"]
         # 标签集合并去重
         assert set(wan["标签集"]) == {"隐忍", "谋略", "果断"}, wan["标签集"]
-        # 详情键级合并，原有"族长"保留，新增"武器"
+        # 详情键级合并，原有"族长"保留，新增自由快照字段自动带章节前缀
         assert wan["详情"]["族长"] == "角色:林父"
-        assert wan["详情"]["武器"] == "短剑"
+        assert wan["详情"]["0015-武器"] == "短剑"
         # 分组（标量）非空覆盖
         assert wan["分组"] == "世家/林家"
         # 统计：1个修改，0个新增
@@ -222,8 +222,8 @@ def test_cumulative_detail_fields_append_without_overwriting():
         },
     )
     assert json.loads(natural["外貌细节"]) == ["第001章：衣着狼狈", "第002章：动作利落"]
-    assert json.loads(natural["口癖台词"]) == ["第001章：常用反问压人", "第002章：继续用反问制造压迫感"]
-    assert json.loads(natural["经营状态"]) == ["第001章：客栈生意冷清", "第002章：客栈因冲突引来围观"]
+    assert json.loads(natural["口癖台词"]) == ["第002章：继续用反问制造压迫感"]
+    assert natural["经营状态"] == "第002章：客栈因冲突引来围观"
     assert natural["关联线索"] == ["线索:资金缺口", "线索:账本异常"]
 
     tags = merge_detail_field(
@@ -232,6 +232,49 @@ def test_cumulative_detail_fields_append_without_overwriting():
     )
     assert parse_supplementary_tags(tags["补充标签"]) == ["人物类型:掌柜", "喜剧包袱", "关系待确认"]
     print("[OK] 累计型详情字段追加去重，不覆盖")
+
+
+def test_non_event_free_detail_keys_are_chapter_prefixed_without_touching_machine_fields():
+    detail = merge_detail_field(
+        {},
+        {
+            "提取理由": "本章更新",
+            "首次章节": "0005",
+            "最近章节": "0005",
+            "当前修为": "练气三层",
+            "关联线索": ["线索:神秘小瓶"],
+            "人物轨迹": '["第005章：确认修炼瓶颈"]',
+            "补充标签": '["人物类型:核心主角"]',
+        },
+        collection_key="角色集",
+        chapter_prefix="0005",
+    )
+    assert "提取理由" not in detail
+    assert detail["首次章节"] == "0005"
+    assert detail["最近章节"] == "0005"
+    assert detail["0005-当前修为"] == "练气三层"
+    assert detail["关联线索"] == ["线索:神秘小瓶"]
+    assert json.loads(detail["人物轨迹"]) == ["第005章：确认修炼瓶颈"]
+    assert parse_supplementary_tags(detail["补充标签"]) == ["人物类型:核心主角"]
+
+
+def test_event_detail_keys_and_json_string_array_values_do_not_keep_chapter_noise():
+    detail = merge_detail_field(
+        {"动作链条": '["第001章：旧动作"]'},
+        {
+            "涉及章节": "0001",
+            "提取理由": "事件本章发生",
+            "动作链条": '["第001章：旧动作","第001章-新动作","0001-补充动作"]',
+            "冲突变化": "第001章：矛盾升级",
+        },
+        collection_key="事件集",
+        chapter_prefix="0001",
+    )
+    assert detail["涉及章节"] == "0001"
+    assert detail["提取理由"] == "事件本章发生"
+    assert "0001-动作链条" not in detail
+    assert json.loads(detail["动作链条"]) == ["旧动作", "新动作", "补充动作"]
+    assert json.loads(detail["冲突变化"]) == ["矛盾升级"]
 
 
 def test_detail_reason_is_preserved_only_for_events_while_legacy_trace_is_not_merged():
@@ -383,6 +426,10 @@ if __name__ == '__main__':
     test_intro_dedup()
     test_list_dedup()
     test_detail_merge()
+    test_cumulative_detail_fields_append_without_overwriting()
+    test_non_event_free_detail_keys_are_chapter_prefixed_without_touching_machine_fields()
+    test_event_detail_keys_and_json_string_array_values_do_not_keep_chapter_noise()
+    test_detail_reason_is_preserved_only_for_events_while_legacy_trace_is_not_merged()
     test_detail_evidence_is_not_merged_into_final_elements()
     test_scalar_merge()
     test_toplevel_intro_merge()

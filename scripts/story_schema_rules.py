@@ -71,7 +71,7 @@ COLLECTION_TO_TYPE = {
 }
 
 MIN_COUNTS = {"角色集": 0, "事件集": 0, "地点集": 0, "线索集": 0, "阵营集": 0, "物品集": 0, "其他事项集": 0}
-DETAIL_KEY_RE = re.compile(r"^[\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9]+$")
+DETAIL_KEY_RE = re.compile(r"^[\u3400-\u4dbf\u4e00-\u9fffA-Za-z0-9\-]+$")
 DETAIL_REF_RE = re.compile(r"^(角色|事件|地点|线索|阵营|物品|道具):(.+)$")
 LEGACY_FINAL_TRACE_DETAIL_FIELDS = {"来源章节", "首次出现章节", "最近更新章节"}
 DELTA_ONLY_DETAIL_FIELDS = {"提取理由"}
@@ -100,11 +100,7 @@ def is_cumulative_detail_field(key: Any) -> bool:
         return False
     if key in DETAIL_REF_ARRAY_KEYS or key.startswith("关联"):
         return False
-    return (
-        key in DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS
-        or key.endswith(DETAIL_CUMULATIVE_KEY_SUFFIXES)
-        or any(marker in key for marker in DETAIL_CUMULATIVE_KEY_SUFFIXES)
-    )
+    return key in DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS
 
 
 STRICT_DETAIL_KEY_FIELDS = {

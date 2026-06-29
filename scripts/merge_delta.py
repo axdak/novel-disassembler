@@ -34,15 +34,18 @@ import sys
 import os
 import json
 import tempfile
+import re
 
 from chronology import (
     assign_event_group_orders,
     insert_event_in_chapter_order,
+    normalize_chapter_value,
     normalize_event_temporal_fields,
 )
 from story_schema_rules import (
     COLLECTION_KEYS,
     DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS,
+    STRICT_DETAIL_KEY_FIELDS,
     SUPPLEMENTARY_TAGS_DETAIL_KEY,
     dump_supplementary_tags,
     is_cumulative_detail_field,
@@ -80,6 +83,8 @@ INTRO_FIELD = "介绍"
 BASE_LEGACY_TRACE_DETAIL_FIELDS = {"来源章节", "首次出现章节", "最近更新章节"}
 DELTA_ONLY_DETAIL_FIELDS = {"提取理由"}
 CUMULATIVE_DETAIL_ARRAY_FIELDS = DETAIL_CUMULATIVE_JSON_ARRAY_FIELDS
+CHAPTER_PREFIXED_DETAIL_KEY_RE = re.compile(r"^\d{4,}-")
+LEADING_CHAPTER_MARKER_RE = re.compile(r"^\s*(?:第?\d{1,6}\s*章|\d{4,})\s*[:：,，、\-]\s*")
 
 # 顶层骨架与统一 Schema 共用集合定义，避免新增集合时合并器遗漏。
 TOPLEVEL_SKELETON = {"介绍": {"标题": "", "描述": ""}, **{key: [] for key in COLLECTION_KEYS}}
@@ -182,7 +187,28 @@ def detail_fields_to_skip(collection_key=""):
     return fields
 
 
-def merge_detail_field(existing_detail, new_detail, collection_key=""):
+def should_prefix_detail_key(key, collection_key="", chapter_prefix=""):
+    """Only free-form non-event snapshot keys receive a chapter prefix."""
+    if not chapter_prefix or collection_key == "事件集":
+        return False
+    if not isinstance(key, str) or not key:
+        return False
+    if key in STRICT_DETAIL_KEY_FIELDS or key.startswith("关联"):
+        return False
+    if key in BASE_LEGACY_TRACE_DETAIL_FIELDS or is_cumulative_detail_field(key):
+        return False
+    if CHAPTER_PREFIXED_DETAIL_KEY_RE.match(key):
+        return False
+    return True
+
+
+def strip_leading_chapter_marker(text):
+    if not isinstance(text, str):
+        return text
+    return LEADING_CHAPTER_MARKER_RE.sub("", text, count=1).strip()
+
+
+def merge_detail_field(existing_detail, new_detail, collection_key="", chapter_prefix=""):
     """合并最终详情，过程追溯字段仅留在Delta/分析/治理补丁。"""
     if not isinstance(existing_detail, dict):
         existing_detail = {}
@@ -193,25 +219,36 @@ def merge_detail_field(existing_detail, new_detail, collection_key=""):
     for k, new_v in new_detail.items():
         if k in skip_fields:
             continue
-        if k not in merged:
+
+        actual_key = k
+        if should_prefix_detail_key(k, collection_key, chapter_prefix):
+            actual_key = f"{chapter_prefix}-{k}"
+        strip_event_chapter = collection_key == "事件集" and is_cumulative_detail_field(k)
+
+        if actual_key not in merged:
             if is_cumulative_detail_field(k):
-                merged[k] = merge_json_string_array_field(None, new_v)
+                merged[actual_key] = merge_json_string_array_field(
+                    None, new_v, strip_chapter_marker=strip_event_chapter
+                )
             else:
-                merged[k] = new_v
+                merged[actual_key] = new_v
             continue
-        old_v = merged[k]
+
+        old_v = merged[actual_key]
         if isinstance(old_v, list) and isinstance(new_v, list):
-            merged[k] = merge_list_field(old_v, new_v)
+            merged[actual_key] = merge_list_field(old_v, new_v)
         elif k == SUPPLEMENTARY_TAGS_DETAIL_KEY:
-            merged[k] = merge_supplementary_tags_field(old_v, new_v)
+            merged[actual_key] = merge_supplementary_tags_field(old_v, new_v)
         elif is_cumulative_detail_field(k):
-            merged[k] = merge_json_string_array_field(old_v, new_v)
+            merged[actual_key] = merge_json_string_array_field(
+                old_v, new_v, strip_chapter_marker=strip_event_chapter
+            )
         else:
             # string/其它: 新值非空则覆盖，空则保留旧值
             if new_v in (None, "", [], {}):
-                merged[k] = old_v
+                merged[actual_key] = old_v
             else:
-                merged[k] = new_v
+                merged[actual_key] = new_v
     return merged
 
 
@@ -259,9 +296,12 @@ def dump_json_string_array(items):
     return json.dumps(merge_list_field([], items), ensure_ascii=False, separators=(",", ":"))
 
 
-def merge_json_string_array_field(old_v, new_v):
+def merge_json_string_array_field(old_v, new_v, *, strip_chapter_marker=False):
     """详情中的长期累计字段：JSON 字符串数组追加去重。"""
-    return dump_json_string_array(parse_json_string_array_or_lines(old_v) + parse_json_string_array_or_lines(new_v))
+    items = parse_json_string_array_or_lines(old_v) + parse_json_string_array_or_lines(new_v)
+    if strip_chapter_marker:
+        items = [strip_leading_chapter_marker(item) for item in items]
+    return dump_json_string_array(items)
 
 
 def merge_supplementary_tags_field(old_v, new_v):
@@ -271,7 +311,7 @@ def merge_supplementary_tags_field(old_v, new_v):
     return dump_supplementary_tags(merge_list_field(old_tags, new_tags))
 
 
-def deep_merge_item(existing_item, delta_item, collection_key=""):
+def deep_merge_item(existing_item, delta_item, collection_key="", chapter_prefix=""):
     """
     将 delta_item 字段级深度合并进 existing_item，返回合并后的元素（原地修改 existing_item）。
     语义: 只增不删。Delta未提供的字段不影响已有值。
@@ -291,7 +331,7 @@ def deep_merge_item(existing_item, delta_item, collection_key=""):
             )
         elif field == "详情":
             existing_item[field] = merge_detail_field(
-                existing_item.get(field, {}), new_v, collection_key=collection_key
+                existing_item.get(field, {}), new_v, collection_key=collection_key, chapter_prefix=chapter_prefix
             )
         elif field in SCALAR_FIELDS:
             existing_item[field] = merge_scalar_field(
@@ -306,7 +346,7 @@ def deep_merge_item(existing_item, delta_item, collection_key=""):
     return existing_item
 
 
-def merge_collection(existing_items, new_items, modified_items, collection_key=""):
+def merge_collection(existing_items, new_items, modified_items, collection_key="", chapter_prefix=""):
     """
     合并单个元素集（字段级深度合并 + 别名匹配）。
 
@@ -336,7 +376,7 @@ def merge_collection(existing_items, new_items, modified_items, collection_key="
             idx = find_index(name_index, alias_index, name)
             if idx >= 0:
                 # 命中已有元素 → 字段级深度合并
-                deep_merge_item(existing_items[idx], item, collection_key)
+                deep_merge_item(existing_items[idx], item, collection_key, chapter_prefix)
                 # 合并后把可能新增的别名也登记进 alias_index
                 for alias in item.get(ALIAS_FIELD, []) or []:
                     if alias and alias not in alias_index and alias not in name_index:
@@ -348,7 +388,7 @@ def merge_collection(existing_items, new_items, modified_items, collection_key="
                 clean = {}
                 for k, v in item.items():
                     clean[k] = v
-                clean["详情"] = merge_detail_field({}, clean.get("详情", {}), collection_key=collection_key)
+                clean["详情"] = merge_detail_field({}, clean.get("详情", {}), collection_key=collection_key, chapter_prefix=chapter_prefix)
                 if collection_key == "事件集":
                     normalize_event_temporal_fields(clean)
                     new_idx = insert_event_in_chapter_order(existing_items, clean)
@@ -403,6 +443,8 @@ def merge_delta(incremental_path, delta_path):
 
     delta = load_json(delta_path)
 
+    chapter_prefix = normalize_chapter_value(delta.get("章节", ""))
+
     stats = {}
     new_elements = delta.get("新增元素", {}) or {}
     modified_elements = delta.get("修改元素", {}) or {}
@@ -415,7 +457,7 @@ def merge_delta(incremental_path, delta_path):
         mod_items = modified_elements.get(key, []) or []
 
         merged, added, updated, skipped = merge_collection(
-            existing, new_items, mod_items, key
+            existing, new_items, mod_items, key, chapter_prefix=chapter_prefix
         )
         incremental[key] = merged
         stats[key] = {
