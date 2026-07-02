@@ -311,7 +311,12 @@ output.write_text(json.dumps({
             encoding="utf-8",
         )
 
-        rc = cmd_run(project, audit_command=f'"{sys.executable}" "{worker}"', worker_window="hidden")
+        rc = cmd_run(
+            project,
+            audit_command=f'"{sys.executable}" "{worker}"',
+            worker_window="hidden",
+            worker_loop="continuous",
+        )
 
         assert rc == 0
         status = project / "质量治理" / "周期审计" / "audit_001-005.status.json"
@@ -368,6 +373,7 @@ output.write_text(json.dumps({
             audit_max_context_chars=25000,
             audit_command=f'"{sys.executable}" "{worker}"',
             worker_window="hidden",
+            worker_loop="continuous",
         )
 
         assert rc == 0
@@ -406,6 +412,50 @@ def test_manual_governance_reports_remain_separate():
         assert not list((project / "质量治理" / "周期审计").glob("validate_*governance_*.txt"))
 
     print("[OK] 手工治理报告保持在按需治理目录")
+
+
+def test_periodic_governance_normalize_quarantines_invalid_detail_ref_arrays():
+    with tempfile.TemporaryDirectory() as td:
+        project = Path(td) / "拆书_测试"
+        story = empty_story()
+        story["事件集"].append(
+            {
+                "名称": "事件A",
+                "发生地点": "",
+                "参与成员": [],
+                "重量级": 10,
+                "目标事件": [],
+                "分组": "00000010-测试事件",
+                "时间": "0001-01-01T00:00:00",
+                "别名": [],
+                "标签集": [],
+                "介绍": "测试事件。",
+                "详情": {
+                    "涉及章节": "0001",
+                    "关联事件": ["事件:不存在事件"],
+                },
+            }
+        )
+        write_json(project / "故事结构_增量.json", story)
+        patch = project / "质量治理" / "周期审计" / "correction_001-005.json"
+        write_json(patch, {
+            "章节范围": "第001章-第005章",
+            "治理类型": "no_change",
+            "质量说明": "周期治理回归检查，无需修改。",
+            "证据范围": ["第001章", "第002章", "第003章", "第004章", "第005章"],
+            "新增元素": empty_delta(1)["新增元素"],
+            "修改元素": empty_delta(1)["修改元素"],
+        })
+
+        rc = commit_governance(project, str(patch))
+
+        assert rc == 0
+        normalized = json.loads((project / "故事结构_增量.json").read_text(encoding="utf-8"))
+        detail = normalized["事件集"][0]["详情"]
+        assert detail["关联事件"] == []
+        assert json.loads(detail["待确认引用"]) == ["事件:不存在事件"]
+
+    print("[OK] 周期治理规范化会隔离详情无效引用数组")
 
 
 def test_governance_patch_compresses_tags_before_validation():

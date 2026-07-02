@@ -67,6 +67,7 @@ def auto_args(project: Path, worker: Path, run_mode: str = "worker") -> argparse
         worker_timeout_seconds=30,
         worker_retries=0,
         worker_window="hidden",
+        worker_loop="continuous",
     )
 
 

@@ -108,9 +108,13 @@ DEFAULT_WORKER_RETRIES = int(os.getenv("ND_WORKER_RETRIES", "2"))
 RUN_MODES = ("auto", "subagent", "serial", "worker")
 WORKER_PROVIDERS = ("manual", "auto", "agy", "codebuddy")
 WORKER_WINDOWS = ("hidden", "powershell", "powershell-keep")
-DEFAULT_WORKER_WINDOW = os.getenv("ND_WORKER_WINDOW", "powershell")
+WORKER_LOOPS = ("supervised", "continuous")
+DEFAULT_WORKER_WINDOW = os.getenv("ND_WORKER_WINDOW", "hidden")
 if DEFAULT_WORKER_WINDOW not in WORKER_WINDOWS:
-    DEFAULT_WORKER_WINDOW = "powershell"
+    DEFAULT_WORKER_WINDOW = "hidden"
+DEFAULT_WORKER_LOOP = os.getenv("ND_WORKER_LOOP", "supervised")
+if DEFAULT_WORKER_LOOP not in WORKER_LOOPS:
+    DEFAULT_WORKER_LOOP = "supervised"
 
 # 周期审计由外部 Agent 执行，脚本无法得知实际模型 tokenizer，故采用可配置的
 # 字符预算而不伪造精确 token 计数。默认值为 256k 上下文模型预留输出、系统提示和
@@ -440,6 +444,99 @@ def run_worker(
         print(f"worker完成: task={task_type} output={expected_output} log={log_path}")
         return 0
     return 1
+
+
+def display_shell_command(args: List[str]) -> str:
+    return subprocess.list2cmdline([str(arg) for arg in args if str(arg) != ""])
+
+
+def build_run_foreground_command(
+    project_dir: Path,
+    *,
+    phase: str = "",
+    max_chapters: int = 0,
+    audit_interval: int = 5,
+    audit_max_context_chars: int = DEFAULT_AUDIT_MAX_CONTEXT_CHARS,
+    run_mode: str = "worker",
+    worker_provider: str = "manual",
+    chapter_command: str = "",
+    audit_command: str = "",
+    worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
+    worker_retries: int = DEFAULT_WORKER_RETRIES,
+    worker_window: str = DEFAULT_WORKER_WINDOW,
+    worker_loop: str = DEFAULT_WORKER_LOOP,
+) -> str:
+    args: List[str] = [sys.executable, str(Path(__file__).resolve()), "run", str(project_dir)]
+    if max_chapters:
+        args.extend(["--max-chapters", str(max_chapters)])
+    if audit_interval != 5:
+        args.extend(["--audit-interval", str(audit_interval)])
+    if phase:
+        args.extend(["--phase", phase])
+    if audit_max_context_chars != DEFAULT_AUDIT_MAX_CONTEXT_CHARS:
+        args.extend(["--audit-max-context-chars", str(audit_max_context_chars)])
+    args.extend(["--run-mode", run_mode])
+    if worker_provider and worker_provider != "manual":
+        args.extend(["--worker-provider", worker_provider])
+    else:
+        if chapter_command:
+            args.extend(["--chapter-command", chapter_command])
+        if audit_command:
+            args.extend(["--audit-command", audit_command])
+    if worker_timeout_seconds != DEFAULT_WORKER_TIMEOUT_SECONDS:
+        args.extend(["--worker-timeout-seconds", str(worker_timeout_seconds)])
+    if worker_retries != DEFAULT_WORKER_RETRIES:
+        args.extend(["--worker-retries", str(worker_retries)])
+    if worker_loop != DEFAULT_WORKER_LOOP:
+        args.extend(["--worker-loop", worker_loop])
+    if worker_window != DEFAULT_WORKER_WINDOW:
+        args.extend(["--worker-window", worker_window])
+    return display_shell_command(args)
+
+
+def build_analysis_auto_foreground_command(args: argparse.Namespace, task: str, run_mode: str) -> str:
+    command_name = "visual-assets-auto" if task == "visual_assets" else "chapter-structure-auto"
+    command: List[str] = [sys.executable, str(Path(__file__).resolve()), command_name, str(args.project_dir)]
+    for name, flag, default in [
+        ("include_original", "--include-original", "sample"),
+        ("max_pack_chars", "--max-pack-chars", 70000),
+        ("max_original_chars", "--max-original-chars", 6000),
+        ("max_analysis_chars", "--max-analysis-chars", 12000),
+    ]:
+        value = getattr(args, name, default)
+        if value != default:
+            command.extend([flag, str(value)])
+    if task == "visual_assets" and getattr(args, "force_aggregate", False):
+        command.append("--force-aggregate")
+    command.extend(["--run-mode", run_mode])
+    worker_provider = getattr(args, "worker_provider", "manual")
+    worker_command = getattr(args, "worker_command", "")
+    if worker_provider and worker_provider != "manual":
+        command.extend(["--worker-provider", worker_provider])
+    elif worker_command:
+        command.extend(["--worker-command", worker_command])
+    if getattr(args, "worker_timeout_seconds", DEFAULT_WORKER_TIMEOUT_SECONDS) != DEFAULT_WORKER_TIMEOUT_SECONDS:
+        command.extend(["--worker-timeout-seconds", str(args.worker_timeout_seconds)])
+    if getattr(args, "worker_retries", DEFAULT_WORKER_RETRIES) != DEFAULT_WORKER_RETRIES:
+        command.extend(["--worker-retries", str(args.worker_retries)])
+    if getattr(args, "worker_loop", DEFAULT_WORKER_LOOP) != DEFAULT_WORKER_LOOP:
+        command.extend(["--worker-loop", str(args.worker_loop)])
+    if getattr(args, "worker_window", DEFAULT_WORKER_WINDOW) != DEFAULT_WORKER_WINDOW:
+        command.extend(["--worker-window", str(args.worker_window)])
+    return display_shell_command(command)
+
+
+def worker_supervision_checkpoint(worker_loop: str, message: str, rerun_command: str = "") -> bool:
+    if worker_loop != "supervised":
+        return False
+    print(f"WORKER_SUPERVISION_CHECKPOINT: {message}")
+    print("This checkpoint is not completion.")
+    print("Do not wait for task-notification or treat a background task id as done.")
+    print("Main agent must inspect status/logs, wait for the foreground return code, and rerun the same route.")
+    if rerun_command:
+        print("NEXT_FOREGROUND_COMMAND:")
+        print(rerun_command)
+    return True
 
 
 def run_multi_output_worker(
@@ -1245,6 +1342,8 @@ def run_child_periodic_governance(
     worker_timeout_seconds: int,
     worker_retries: int,
     worker_window: str,
+    worker_loop: str,
+    rerun_command: str = "",
 ) -> int:
     if audit_children_resolved(project_dir, child_ranges):
         mark_audit_covered_by_children(project_dir, start, end, child_ranges)
@@ -1263,6 +1362,8 @@ def run_child_periodic_governance(
             worker_timeout_seconds=worker_timeout_seconds,
             worker_retries=worker_retries,
             worker_window=worker_window,
+            worker_loop=worker_loop,
+            rerun_command=rerun_command,
         )
         if rc != 0:
             return rc
@@ -1332,6 +1433,8 @@ def run_periodic_governance(
     worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
     worker_retries: int = DEFAULT_WORKER_RETRIES,
     worker_window: str = DEFAULT_WORKER_WINDOW,
+    worker_loop: str = DEFAULT_WORKER_LOOP,
+    rerun_command: str = "",
 ) -> int:
     paths = audit_paths(project_dir, start, end)
     existing_status = load_json(paths["status"], {}) if paths["status"].is_file() else {}
@@ -1348,6 +1451,7 @@ def run_periodic_governance(
             worker_timeout_seconds,
             worker_retries,
             worker_window,
+            worker_loop,
         )
 
     pack = write_audit_pack(project_dir, start, end, max_context_chars=max_context_chars)
@@ -1382,6 +1486,8 @@ def run_periodic_governance(
                 worker_timeout_seconds,
                 worker_retries,
                 worker_window,
+                worker_loop,
+                rerun_command,
             )
         return 1
     for attempt in range(worker_retries + 1):
@@ -1408,6 +1514,8 @@ def run_periodic_governance(
             if rc != 0:
                 update_audit_status(paths, status="worker_failed", action="审计 worker 失败；查看 worker 日志后重试。")
                 return rc
+            if worker_supervision_checkpoint(worker_loop, f"audit correction written for {start:03d}-{end:03d}", rerun_command):
+                return 2
 
         rc = commit_governance(project_dir, str(paths["correction"]))
         if rc == 0:
@@ -1435,6 +1543,8 @@ def run_periodic_governance(
         if rc != 0:
             update_audit_status(paths, status="worker_failed", action="审计修复 worker 失败；查看 worker 日志后重试。")
             return rc
+        if worker_supervision_checkpoint(worker_loop, f"audit repair written for {start:03d}-{end:03d}", rerun_command):
+            return 2
     return 2
 
 
@@ -1741,6 +1851,8 @@ def cmd_run_analysis(
     worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
     worker_retries: int = DEFAULT_WORKER_RETRIES,
     worker_window: str = DEFAULT_WORKER_WINDOW,
+    worker_loop: str = DEFAULT_WORKER_LOOP,
+    rerun_command: str = "",
 ) -> int:
     """Create and validate every chapter-analysis MD without touching Delta flow."""
     init_dirs(project_dir)
@@ -1771,6 +1883,8 @@ def cmd_run_analysis(
             )
             if rc != 0:
                 return rc
+            if worker_supervision_checkpoint(worker_loop, f"analysis artifact written for ch{seq_from_file(chapter):03d}", rerun_command):
+                return 2
             continue
         analysis_ok, analysis_errors = validate_chapter_analysis_file(p["analysis"])
         if not analysis_ok:
@@ -1791,6 +1905,8 @@ def cmd_run_analysis(
             )
             if rc != 0:
                 return rc
+            if worker_supervision_checkpoint(worker_loop, f"analysis artifact regenerated for ch{seq_from_file(chapter):03d}", rerun_command):
+                return 2
             continue
         p["analysis_regenerate_task"].unlink(missing_ok=True)
     print("所有章节分析MD均已通过校验。")
@@ -1808,6 +1924,8 @@ def cmd_run_delta(
     worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
     worker_retries: int = DEFAULT_WORKER_RETRIES,
     worker_window: str = DEFAULT_WORKER_WINDOW,
+    worker_loop: str = DEFAULT_WORKER_LOOP,
+    rerun_command: str = "",
 ) -> int:
     """Require all chapter analyses before entering the existing serial Delta flow."""
     init_dirs(project_dir)
@@ -1838,6 +1956,8 @@ def cmd_run_delta(
             )
             if rc != 0:
                 return rc
+            if worker_supervision_checkpoint(worker_loop, f"analysis artifact written for ch{seq_from_file(chapter):03d}", rerun_command):
+                return 2
             continue
         analysis_ok, analysis_errors = validate_chapter_analysis_file(p["analysis"])
         if not analysis_ok:
@@ -1858,6 +1978,8 @@ def cmd_run_delta(
             )
             if rc != 0:
                 return rc
+            if worker_supervision_checkpoint(worker_loop, f"analysis artifact regenerated for ch{seq_from_file(chapter):03d}", rerun_command):
+                return 2
             continue
         p["analysis_regenerate_task"].unlink(missing_ok=True)
     return cmd_run(
@@ -1872,6 +1994,8 @@ def cmd_run_delta(
         worker_timeout_seconds=worker_timeout_seconds,
         worker_retries=worker_retries,
         worker_window=worker_window,
+        worker_loop=worker_loop,
+        rerun_command=rerun_command,
     )
 
 
@@ -1888,8 +2012,26 @@ def cmd_run(
     worker_timeout_seconds: int = DEFAULT_WORKER_TIMEOUT_SECONDS,
     worker_retries: int = DEFAULT_WORKER_RETRIES,
     worker_window: str = DEFAULT_WORKER_WINDOW,
+    worker_loop: str = DEFAULT_WORKER_LOOP,
 ) -> int:
+    requested_chapter_command = chapter_command
+    requested_audit_command = audit_command
     mode = effective_run_mode(run_mode, chapter_command, audit_command, worker_provider)
+    rerun_command = build_run_foreground_command(
+        project_dir,
+        phase=phase,
+        max_chapters=max_chapters,
+        audit_interval=audit_interval,
+        audit_max_context_chars=audit_max_context_chars,
+        run_mode=mode,
+        worker_provider=worker_provider,
+        chapter_command=requested_chapter_command,
+        audit_command=requested_audit_command,
+        worker_timeout_seconds=worker_timeout_seconds,
+        worker_retries=worker_retries,
+        worker_window=worker_window,
+        worker_loop=worker_loop,
+    )
     chapter_command, audit_command = resolve_worker_commands(chapter_command, audit_command, worker_provider, mode)
     print(f"run route: mode={mode} worker_provider={worker_provider}")
     if phase == "analysis":
@@ -1899,6 +2041,8 @@ def cmd_run(
             worker_timeout_seconds=worker_timeout_seconds,
             worker_retries=worker_retries,
             worker_window=worker_window,
+            worker_loop=worker_loop,
+            rerun_command=rerun_command,
         )
     if phase == "delta":
         return cmd_run_delta(
@@ -1912,6 +2056,8 @@ def cmd_run(
             worker_timeout_seconds=worker_timeout_seconds,
             worker_retries=worker_retries,
             worker_window=worker_window,
+            worker_loop=worker_loop,
+            rerun_command=rerun_command,
         )
     init_dirs(project_dir)
     if not guard_single_unit_artifacts(project_dir):
@@ -1927,6 +2073,8 @@ def cmd_run(
             worker_timeout_seconds=worker_timeout_seconds,
             worker_retries=worker_retries,
             worker_window=worker_window,
+            worker_loop=worker_loop,
+            rerun_command=rerun_command,
         )
         if rc != 0:
             return rc
@@ -1956,6 +2104,8 @@ def cmd_run(
             )
             if rc != 0:
                 return rc
+            if worker_supervision_checkpoint(worker_loop, f"analysis artifact written for ch{seq:03d}", rerun_command):
+                return 2
             continue
         if not p["delta"].is_file():
             rc = prepare_chapter(project_dir, seq)
@@ -1978,6 +2128,8 @@ def cmd_run(
                 )
                 if rc != 0:
                     return rc
+                if worker_supervision_checkpoint(worker_loop, f"analysis artifact regenerated for ch{seq:03d}", rerun_command):
+                    return 2
                 continue
             print("已交接：等待基于章节分析的Delta JSON。")
             if not chapter_command:
@@ -1995,6 +2147,8 @@ def cmd_run(
             )
             if rc != 0:
                 return rc
+            if worker_supervision_checkpoint(worker_loop, f"delta artifact written for ch{seq:03d}", rerun_command):
+                return 2
             continue
         rc = commit_chapter(project_dir, seq)
         if rc != 0:
@@ -2012,6 +2166,8 @@ def cmd_run(
                 )
                 if worker_rc != 0:
                     return worker_rc
+                if worker_supervision_checkpoint(worker_loop, f"chapter repair artifact written for ch{seq:03d}", rerun_command):
+                    return 2
                 continue
             return rc
         processed += 1
@@ -2026,12 +2182,16 @@ def cmd_run(
                 worker_timeout_seconds=worker_timeout_seconds,
                 worker_retries=worker_retries,
                 worker_window=worker_window,
+                worker_loop=worker_loop,
+                rerun_command=rerun_command,
             )
             if rc != 0:
                 return rc
         if max_chapters and processed >= max_chapters:
             print(f"已达到本次最大提交章节数: {max_chapters}")
             return 0
+        if mode == "worker" and worker_supervision_checkpoint(worker_loop, f"chapter committed for ch{seq:03d}", rerun_command):
+            return 2
 
 
 
@@ -2077,7 +2237,11 @@ def commit_governance(project_dir: Path, patch_path: str) -> int:
     rc = run_cmd([sys.executable, str(script_path("apply_governance_ops.py")), str(story), str(patch), "--backup"], governance_dir / f"apply_ops_{ts}.txt")
     if rc not in (0,2):
         shutil.copy2(before, story); print("治理操作失败，已回滚。") ; return 1
-    run_cmd([sys.executable, str(script_path("normalize_story_schema.py")), str(story), "--in-place", "--report", str(project_dir / "质量治理" / "规范化" / f"normalize_governance_{ts}.txt")])
+    normalize_cmd = [sys.executable, str(script_path("normalize_story_schema.py")), str(story), "--in-place"]
+    if is_periodic_patch:
+        normalize_cmd.append("--quarantine-invalid-refs")
+    normalize_cmd.extend(["--report", str(project_dir / "质量治理" / "规范化" / f"normalize_governance_{ts}.txt")])
+    run_cmd(normalize_cmd)
     rc = run_cmd([sys.executable, str(script_path("validate_structure.py")), "--mode", "governance", str(story)], report_schema)
     if rc != 0:
         shutil.copy2(before, story); print(f"治理后结构校验失败，已回滚: {report_schema}") ; return 1
@@ -2448,6 +2612,7 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
         getattr(args, "worker_provider", "manual"),
         getattr(args, "run_mode", "auto"),
     )
+    rerun_command = build_analysis_auto_foreground_command(args, task, mode)
     print(f"{task} route: mode={mode} worker_provider={getattr(args, 'worker_provider', 'manual')}")
     eligible = chapters_eligible_for_visual(project_dir)
     if not eligible:
@@ -2484,6 +2649,8 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
         )
         if rc != 0:
             return rc
+        if worker_supervision_checkpoint(getattr(args, "worker_loop", DEFAULT_WORKER_LOOP), f"{task} artifacts written for ch{next_seq:03d}", rerun_command):
+            return 2
 
     if task != "visual_assets":
         print(f"all per-chapter {task} artifacts are complete.")
@@ -2503,7 +2670,7 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
     if not worker_command:
         print("handoff: complete the aggregate task pack, write top-level artifact(s), then rerun the same command.")
         return 2
-    return run_multi_output_worker(
+    rc = run_multi_output_worker(
         worker_command,
         project_dir,
         "visual_assets_aggregate",
@@ -2514,6 +2681,11 @@ def cmd_per_chapter_analysis_auto(args: argparse.Namespace, task: str) -> int:
         retries=getattr(args, "worker_retries", DEFAULT_WORKER_RETRIES),
         worker_window=getattr(args, "worker_window", DEFAULT_WORKER_WINDOW),
     )
+    if rc != 0:
+        return rc
+    if worker_supervision_checkpoint(getattr(args, "worker_loop", DEFAULT_WORKER_LOOP), "visual_assets aggregate artifacts written", rerun_command):
+        return 2
+    return 0
 
 
 def cmd_visual_assets_auto(args: argparse.Namespace) -> int:
@@ -2644,9 +2816,10 @@ def main() -> int:
     p_run.add_argument("--worker-provider", choices=WORKER_PROVIDERS, default="manual", help="built-in worker provider; only used by --run-mode worker or auto worker routing")
     p_run.add_argument("--worker-timeout-seconds", type=positive_int, default=DEFAULT_WORKER_TIMEOUT_SECONDS, help="单次外部 worker 命令超时秒数")
     p_run.add_argument("--worker-retries", type=non_negative_int, default=DEFAULT_WORKER_RETRIES, help="外部 worker 失败或未写出产物后的重试次数；默认 2，表示总共执行 3 次")
+    p_run.add_argument("--worker-loop", choices=WORKER_LOOPS, default=DEFAULT_WORKER_LOOP, help="worker loop mode: supervised=return after each worker task/chapter checkpoint by default, continuous=run until completion or failure")
 
     p_resume = sub.add_parser("resume", help="查看下一步缺什么")
-    p_run.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: powershell=visible auto-close window by default, hidden=current terminal/log, powershell-keep=visible window waits for Enter")
+    p_run.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: hidden=current terminal/log by default, powershell=visible auto-close window, powershell-keep=visible window waits for Enter")
 
     p_resume.add_argument("project_dir")
 
@@ -2705,9 +2878,10 @@ def main() -> int:
     p_vauto.add_argument("--worker-command", default="", help="external multi-output analysis worker command")
     p_vauto.add_argument("--worker-timeout-seconds", type=positive_int, default=DEFAULT_WORKER_TIMEOUT_SECONDS)
     p_vauto.add_argument("--worker-retries", type=non_negative_int, default=DEFAULT_WORKER_RETRIES)
+    p_vauto.add_argument("--worker-loop", choices=WORKER_LOOPS, default=DEFAULT_WORKER_LOOP, help="worker loop mode: supervised by default, or continuous")
 
     p_sauto = sub.add_parser("chapter-structure-auto", help="按章自主推进故事结构章节结构生成")
-    p_vauto.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: powershell by default, hidden, or powershell-keep")
+    p_vauto.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: hidden by default, powershell, or powershell-keep")
 
     p_sauto.add_argument("project_dir")
     p_sauto.add_argument("--include-original", choices=["none", "sample", "full"], default="sample")
@@ -2720,7 +2894,8 @@ def main() -> int:
     p_sauto.add_argument("--worker-command", default="", help="external multi-output analysis worker command")
     p_sauto.add_argument("--worker-timeout-seconds", type=positive_int, default=DEFAULT_WORKER_TIMEOUT_SECONDS)
     p_sauto.add_argument("--worker-retries", type=non_negative_int, default=DEFAULT_WORKER_RETRIES)
-    p_sauto.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: powershell by default, hidden, or powershell-keep")
+    p_sauto.add_argument("--worker-loop", choices=WORKER_LOOPS, default=DEFAULT_WORKER_LOOP, help="worker loop mode: supervised by default, or continuous")
+    p_sauto.add_argument("--worker-window", choices=WORKER_WINDOWS, default=DEFAULT_WORKER_WINDOW, help="worker display mode: hidden by default, powershell, or powershell-keep")
 
     p_fpack = sub.add_parser("final-pack", help="生成最终结构整理任务包（复制增量为草稿+校验+打包参考材料）")
     p_fpack.add_argument("project_dir")
@@ -2761,6 +2936,7 @@ def main() -> int:
             worker_timeout_seconds=args.worker_timeout_seconds,
             worker_retries=args.worker_retries,
             worker_window=args.worker_window,
+            worker_loop=args.worker_loop,
         )
     if args.cmd == "resume":
         return cmd_resume(project_dir)

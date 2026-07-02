@@ -23,7 +23,9 @@ agent_created: true
 10. 允许使用项目已有确定性修复脚本，或必要时使用一次性 format-only 修复脚本，处理已经存在的当前章节 Delta JSON 的语法、字符串转义、字段类型、章节时间、标签压缩等机械格式问题；这类脚本不得新增剧情事实、不得新增语义元素、不得读取原文生成内容、不得以提高效率或推进多章为目的复用。
 11. 外部 worker 自动生成模式只在 `--run-mode worker` 或 auto 路由检测到 worker 配置时开启；未显式选择 worker 前，`run_pipeline.py` 只生成任务包并由 subagent/serial/人工按任务包产出。配置后，脚本仍只信任校验结果，不信任 worker 自述成功。
 
-12. 若用户希望脚本自动选择或固定调用 Antigravity CLI 或 CodeBuddy，章节主流程使用 `run_pipeline.py run <项目目录> --run-mode worker --worker-provider auto|agy|codebuddy`；视觉资产和章节结构分章分析使用 `visual-assets-auto` / `chapter-structure-auto` 搭配 `--run-mode worker --worker-provider auto|agy|codebuddy` 或显式 `--worker-command`。这是受控外部 worker 入口，等价于显式配置内置 wrapper；`auto` 默认优先调用 Agy，Agy 不可用时尝试 CodeBuddy；不再支持 Claude Code provider。
+   worker 模式下默认 `--worker-loop supervised`：每次 worker 写出一个任务包产物或提交一个章节检查点后，管线返回前台让主控Agent接收状态并重跑同一路由命令；不能启动后台 worker 后结束对话；不得把后台任务 ID 当作完成状态；不得等待 task-notification；不得使用后台任务托管主流程；必须等待前台命令返回码。worker 是当前任务包的执行单元，不是替代主控Agent的后台服务。只有用户明确要求无人值守连续跑到底时，才使用 `--worker-loop continuous`。
+
+12. 若用户希望脚本自动选择或固定调用 Antigravity CLI 或 CodeBuddy，章节主流程使用 `run_pipeline.py run <项目目录> --run-mode worker --worker-provider auto|agy|codebuddy`；视觉资产和章节结构分章分析使用 `visual-assets-auto` / `chapter-structure-auto` 搭配 `--run-mode worker --worker-provider auto|agy|codebuddy` 或显式 `--worker-command`。这是受控外部 worker 入口，等价于显式配置内置 wrapper；`auto` 默认优先调用 Agy，Agy 不可用时尝试 CodeBuddy；不再支持 Claude Code provider。默认 supervised 会频繁返回 `2` 作为前台监督检查点；需要恢复旧的一条命令连续跑到底时显式追加 `--worker-loop continuous`。
 
 ## 严格执行边界
 

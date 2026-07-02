@@ -11,11 +11,34 @@ ROOT = Path(__file__).resolve().parent.parent / "scripts"
 WORKER = Path(__file__).resolve().parent.parent / "tools" / "agent_worker.py"
 sys.path.insert(0, str(ROOT))
 
-from run_pipeline import DEFAULT_WORKER_WINDOW, run_worker  # noqa: E402
+from run_pipeline import DEFAULT_WORKER_LOOP, DEFAULT_WORKER_WINDOW, run_worker, worker_supervision_checkpoint  # noqa: E402
 
 
-def test_default_worker_window_is_visible_auto_close():
-    assert DEFAULT_WORKER_WINDOW == "powershell"
+def test_default_worker_window_is_hidden():
+    assert DEFAULT_WORKER_WINDOW == "hidden"
+
+
+def test_default_worker_loop_is_supervised():
+    assert DEFAULT_WORKER_LOOP == "supervised"
+
+
+def test_worker_supervision_checkpoint_prints_foreground_rerun_contract():
+    captured = io.StringIO()
+
+    with redirect_stdout(captured):
+        should_stop = worker_supervision_checkpoint(
+            "supervised",
+            "analysis artifact accepted",
+            "python scripts/run_pipeline.py run C:/book --run-mode worker --worker-provider agy",
+        )
+
+    output = captured.getvalue()
+    assert should_stop is True
+    assert "WORKER_SUPERVISION_CHECKPOINT" in output
+    assert "not completion" in output
+    assert "Do not wait for task-notification" in output
+    assert "NEXT_FOREGROUND_COMMAND:" in output
+    assert "python scripts/run_pipeline.py run C:/book --run-mode worker --worker-provider agy" in output
 
 
 def test_run_worker_streams_external_output_to_terminal():

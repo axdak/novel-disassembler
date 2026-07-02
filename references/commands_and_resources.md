@@ -20,7 +20,7 @@ python <skill_path>/scripts/run_pipeline.py run <项目目录> \
   --worker-retries 2
 ```
 
-`--run-mode subagent` 表示主Agent调度子Agent，`--run-mode serial` 表示主Agent在返回 `2` 后亲自完成任务包并立刻重跑，`--run-mode worker` 表示脚本调用外部 worker。`--worker-provider auto` 会优先选择 Agy；如果 Agy 不可用，再尝试 CodeBuddy。也可以显式指定：
+`--run-mode subagent` 表示主Agent调度子Agent，`--run-mode serial` 表示主Agent在返回 `2` 后亲自完成任务包并立刻重跑，`--run-mode worker` 表示脚本调用外部 worker。worker 默认 `--worker-loop supervised`，每次 worker 产出一个任务包或章节提交检查点后返回前台；`--worker-provider auto` 会优先选择 Agy；如果 Agy 不可用，再尝试 CodeBuddy。也可以显式指定：
 ```bash
 python <skill_path>/scripts/run_pipeline.py run <项目目录> --run-mode worker --worker-provider agy
 python <skill_path>/scripts/run_pipeline.py run <项目目录> --run-mode worker --worker-provider codebuddy
@@ -52,15 +52,16 @@ $env:ND_AGY_BIN = "C:\Users\53519\AppData\Local\agy\bin\agy.exe"
 也可通过 `ND_AGY_BIN`、`ND_CODEBUDDY_BIN` 指定 CLI 完整路径，通过 `ND_CODEBUDDY_ARGS` 追加 CodeBuddy 参数，通过 `ND_AGENT_MODEL` 指定模型，通过 `ND_AGENT_PROVIDER_ORDER` 调整 auto 顺序。
 
 worker 命令通过环境变量接收任务：
-在 Windows 上，`run`、`visual-assets-auto` 和 `chapter-structure-auto` 的外部 worker 默认使用：
-```powershell
---worker-window powershell
-```
-脚本会为每个 worker 任务打开一个新的 PowerShell 窗口，worker 结束后窗口自动关闭；完整输出仍会写入项目的 `质量治理/worker日志/`。
-如果需要静默执行并只看当前终端/日志，可显式追加：
+在 Windows 上，`run`、`visual-assets-auto` 和 `chapter-structure-auto` 的外部 worker 默认使用 `--worker-window hidden`：
 ```powershell
 --worker-window hidden
 ```
+默认模式不会为每个 worker 任务打开新的 PowerShell 窗口；输出会进入当前终端，并写入项目的 `质量治理/worker日志/`。
+需要可见窗口时才使用 `--worker-window powershell`：
+```powershell
+--worker-window powershell
+```
+脚本会为每个 worker 任务打开一个新的 PowerShell 窗口，worker 结束后窗口自动关闭；完整输出仍会写入项目的 `质量治理/worker日志/`。窗口不保证展示模型逐 token 交互过程，尤其是 Agy provider 会以目标文件和后续校验结果作为成功依据；窗口主要用于观察 worker 命令、错误、退出码和日志路径。
 如果需要确认命令确实在弹出的窗口中执行，并查看退出码，可改用：
 ```powershell
 --worker-window powershell-keep
@@ -108,7 +109,7 @@ task_chNNN_analysis.md -> 章节处理/第NNN章_xxx.md
 task_chNNN_delta.md -> 章节处理/第NNN章_xxx.json
 ```
 
-配置 `--run-mode worker` 加 `--worker-provider`、`--chapter-command` 或 `--audit-command` 后，返回 `2` 通常表示 worker 未能完成交接、缺少配置或期望产物未写出；此时主控Agent应查看 worker 日志和任务状态并重试同一条 worker 命令，不应在主会话中亲自写语义产物。`subagent` 和 `serial` 路由则分别由子Agent或主Agent按任务包产出后继续重跑。
+配置 `--run-mode worker` 加 `--worker-provider`、`--chapter-command` 或 `--audit-command` 后，返回 `2` 可能是默认 supervised 检查点，也可能表示 worker 未能完成交接、缺少配置或期望产物未写出；此时主控Agent应查看 worker 日志、任务状态和当前产物，然后重试同一条 worker 命令，不应在主会话中亲自写语义产物。不得等待 task-notification；不得使用后台任务托管主流程；必须等待前台命令返回码。`subagent` 和 `serial` 路由则分别由子Agent或主Agent按任务包产出后继续重跑。
 
 然后继续：
 ```bash

@@ -18,10 +18,12 @@ run_pipeline.py run <项目目录> --run-mode worker --chapter-command "<章节w
 
 此时 `run_pipeline.py` 会在生成任务包后调用外部 worker，并继续执行校验、合并、快照和周期治理。worker 只负责写当前任务包指定的目标文件；主控Agent只负责启动主控器、看总进度、查看 worker 日志、重试或报告硬阻塞。
 
+worker 模式仍然是前台监督流程。默认 `--worker-loop supervised` 会在每次 worker 写出任务包产物或章节提交检查点后返回前台；主控Agent必须持续观察 run_pipeline 输出、worker 日志、状态文件和返回码，并重跑同一路由命令。不能启动后台 worker 后结束对话；不得把后台任务 ID 当作完成状态；不得等待 task-notification；不得使用后台任务托管主流程；必须等待前台命令返回码。窗口已打开或命令已启动只表示 worker 被调度，不表示章节、Delta 或审计已经可信完成。只有用户明确要求无人值守连续跑到底时，才使用 `--worker-loop continuous`。
+
 ```text
 循环运行 run_pipeline.py run <项目目录> --run-mode subagent|serial|worker
   -> 返回 0：本轮可处理状态已经完成；如仍有后续流程，继续同一条命令
-  -> 返回 2：subagent 路由派发子Agent；serial 路由由主Agent产出后重跑；worker 路由检查 worker 日志/配置/期望输出并重试
+  -> 返回 2：subagent 路由派发子Agent；serial 路由由主Agent产出后重跑；worker 路由可能是 supervised 检查点，也可能是 worker 交接/配置/期望输出问题，主控Agent必须检查 worker 日志、状态文件和当前产物后重跑同一路由
   -> 返回 1：读取校验报告、修复任务包、worker 日志和相关产物，优先通过同一 worker 入口修复后重试
 ```
 
@@ -59,4 +61,4 @@ run_pipeline.py run <项目目录> --run-mode worker --chapter-command "<章节w
 
 ## 外部 worker 模式（默认关闭）
 
-外部 worker 模式由 `--run-mode worker` 搭配 `--worker-provider` 或 `--chapter-command` / `--audit-command` 显式开启。脚本负责生成任务包、调用 worker、验收目标文件、校验、回滚和重试；worker 只负责自然语言理解与结构提取。未显式选择 worker 前，`run_pipeline.py run` 仍只生成任务包并等待 subagent/serial/人工产出。
+外部 worker 模式由 `--run-mode worker` 搭配 `--worker-provider` 或 `--chapter-command` / `--audit-command` 显式开启。脚本负责生成任务包、调用 worker、验收目标文件、校验、回滚和重试；worker 只负责自然语言理解与结构提取。默认 `--worker-loop supervised`，不会在一条命令里连续消费完整全流程；未显式选择 worker 前，`run_pipeline.py run` 仍只生成任务包并等待 subagent/serial/人工产出。

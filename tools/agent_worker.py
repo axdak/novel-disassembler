@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generic external-agent worker for novel-disassembler task packages.
 
-The pipeline supplies ND_* environment variables. This wrapper calls one
-headless CLI provider, captures stdout, and writes exactly ND_EXPECTED_OUTPUT.
+The pipeline supplies ND_* environment variables. This wrapper adapts each
+headless CLI provider to the pipeline artifact contract.
 """
 
 from __future__ import annotations
@@ -74,7 +74,6 @@ def provider_command(provider: str, project_dir: Path, timeout: str) -> List[str
         return parts
     if provider == "agy":
         parts = split_command(os.environ.get("ND_AGY_BIN", default_agy_bin())) + [
-            "--print",
             "--print-timeout",
             timeout,
             "--add-dir",
@@ -86,6 +85,14 @@ def provider_command(provider: str, project_dir: Path, timeout: str) -> List[str
             parts.extend(["--model", model])
         return parts
     raise ValueError(f"unsupported provider: {provider}")
+
+
+def provider_captures_stdout(provider: str) -> bool:
+    return provider == "codebuddy"
+
+
+def provider_uses_task_pack_path(provider: str) -> bool:
+    return provider == "agy"
 
 
 def select_provider() -> str:
@@ -182,6 +189,32 @@ Task pack:
 """
 
 
+def build_path_prompt(task_type: str, task_pack: Path, expected_outputs: List[Path]) -> str:
+    expected_output_text = "\n".join(f"- {path}" for path in expected_outputs)
+    if len(expected_outputs) == 1:
+        output_kind = "JSON" if expected_outputs[0].suffix.lower() == ".json" else "Markdown"
+    else:
+        output_kind = "project files"
+    return f"""You are a controlled external worker for novel-disassembler.
+Current task type: {task_type}
+Task pack path: {task_pack}
+Expected output file(s):
+{expected_output_text}
+Expected output kind: {output_kind}
+
+{task_guidance(task_type)}
+
+Hard rules:
+1. Read the task pack from the exact path above; it is the authority for this task.
+2. Write every expected project file listed above directly. Stdout may contain only brief progress; it will not be used as artifact content.
+3. Do not explain, summarize, wrap artifacts in code fences, or add unrelated prose.
+4. Do not edit story_structure_delta.json or any process database.
+5. Do not create scripts, batch processors, schedulers, prompt files, or extra artifacts.
+6. Do not process chapters or audit ranges outside the task pack.
+7. For repair tasks, rewrite only the expected target artifact content.
+"""
+
+
 def required_env(name: str) -> str:
     value = os.environ.get(name, "").strip()
     if not value:
@@ -239,6 +272,17 @@ def run_provider_command(command: List[str], prompt: str, project_dir: Path) -> 
     )
 
 
+def run_provider(
+    provider: str,
+    command: List[str],
+    prompt: str,
+    project_dir: Path,
+) -> subprocess.CompletedProcess[str]:
+    if provider_captures_stdout(provider):
+        return run_provider_command(command, prompt, project_dir)
+    return run_provider_command([*command, "-p", prompt], "", project_dir)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run agy/codebuddy as a controlled task-package worker.")
     parser.add_argument(
@@ -252,24 +296,28 @@ def main() -> int:
     task_type = required_env("ND_TASK_TYPE")
     project_dir = Path(required_env("ND_PROJECT_DIR"))
     task_pack = Path(required_env("ND_TASK_PACK"))
-    expected_outputs, capture_stdout = expected_outputs_from_env()
+    expected_outputs, env_capture_stdout = expected_outputs_from_env()
     if not task_pack.is_file():
         print(f"task pack does not exist: {task_pack}", file=sys.stderr)
         return 1
 
-    prompt = build_prompt(task_type, task_pack, expected_outputs, capture_stdout)
     last_returncode = 1
     attempted = False
     for provider in provider_order(args.provider):
         if provider not in PROVIDER_ORDER:
             continue
+        capture_stdout = env_capture_stdout and provider_captures_stdout(provider)
+        if provider_uses_task_pack_path(provider):
+            prompt = build_path_prompt(task_type, task_pack, expected_outputs)
+        else:
+            prompt = build_prompt(task_type, task_pack, expected_outputs, capture_stdout)
         command = provider_command(provider, project_dir, args.print_timeout)
         if not command_available(command):
             continue
         attempted = True
         if args.provider == "auto":
             print(f"selected provider: {provider}", file=sys.stderr)
-        result = run_provider_command(command, prompt, project_dir)
+        result = run_provider(provider, command, prompt, project_dir)
         last_returncode = result.returncode
         if result.returncode != 0:
             if result.stdout:

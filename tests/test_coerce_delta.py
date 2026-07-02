@@ -166,6 +166,54 @@ def test_目标事件_字符串_转单元素数组():
     assert any("目标事件" in line for line in report)
 
 
+def test_标准字段_匹配类型前缀_自动剥离():
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {
+            "名称": "X",
+            "发生地点": "地点:约翰娜住处",
+            "参与成员": ["角色:约翰娜·奥尔森多", "角色:木女王"],
+            "目标事件": ["事件:浓雾中贾孤零零出现浑身是血"],
+            "时间": "0001-01-01T00:00:00",
+        }
+    )
+    delta["新增元素"]["线索集"].append(
+        {"名称": "伏笔", "涉及事件": ["事件:浓雾中贾孤零零出现浑身是血"]}
+    )
+
+    report = coerce_delta_in_place(delta)
+
+    event = delta["新增元素"]["事件集"][0]
+    assert event["发生地点"] == "约翰娜住处"
+    assert event["参与成员"] == ["约翰娜·奥尔森多", "木女王"]
+    assert event["目标事件"] == ["浓雾中贾孤零零出现浑身是血"]
+    assert delta["新增元素"]["线索集"][0]["涉及事件"] == ["浓雾中贾孤零零出现浑身是血"]
+    assert any("标准字段前缀" in line for line in report)
+
+
+def test_标准字段_不匹配类型前缀_移入待确认引用():
+    delta = _empty_delta()
+    delta["新增元素"]["事件集"].append(
+        {
+            "名称": "X",
+            "参与成员": ["角色:约翰娜·奥尔森多", "地点:城堡"],
+            "目标事件": ["事件:后续", "角色:误写成角色的事件"],
+            "时间": "0001-01-01T00:00:00",
+            "详情": {},
+        }
+    )
+
+    report = coerce_delta_in_place(delta)
+
+    event = delta["新增元素"]["事件集"][0]
+    assert event["参与成员"] == ["约翰娜·奥尔森多"]
+    assert event["目标事件"] == ["后续"]
+    pending = json.loads(event["详情"]["待确认引用"])
+    assert "地点:城堡" in pending
+    assert "角色:误写成角色的事件" in pending
+    assert any("移入详情.待确认引用" in line for line in report)
+
+
 def test_重量级_字符串数字_转int():
     delta = _empty_delta()
     delta["新增元素"]["事件集"].append(
@@ -285,6 +333,34 @@ def test_详情_缺失_自动补空对象():
     delta["新增元素"]["地点集"].append({"名称": "X"})
     coerce_delta_in_place(delta)
     assert isinstance(delta["新增元素"]["地点集"][0]["详情"], dict)
+
+
+def test_非事件详情自由键_剥离开头章节号():
+    delta = _empty_delta()
+    delta["章节"] = "第017章"
+    delta["新增元素"]["角色集"].append(
+        {
+            "名称": "甲",
+            "详情": {
+                "0017心理状态": "紧张",
+                "0017-当前处境": "被困",
+                "第017章身体状态": "受伤",
+                "关联线索": ["线索:资金缺口"],
+            },
+        }
+    )
+
+    report = coerce_delta_in_place(delta)
+
+    detail = delta["新增元素"]["角色集"][0]["详情"]
+    assert detail["心理状态"] == "紧张"
+    assert detail["当前处境"] == "被困"
+    assert detail["身体状态"] == "受伤"
+    assert detail["关联线索"] == ["线索:资金缺口"]
+    assert "0017心理状态" not in detail
+    assert "0017-当前处境" not in detail
+    assert "第017章身体状态" not in detail
+    assert any("详情键章节前缀" in line for line in report)
 
 
 # ---- 不该动的情况（确定性的反测试）----

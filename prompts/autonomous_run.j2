@@ -10,10 +10,12 @@ python <skill_path>/scripts/run_pipeline.py run <项目目录> --run-mode worker
 
 这种模式下，`run_pipeline.py` 会调用 worker 写当前任务包指定产物，并继续验收、校验、合并和回滚。主控Agent负责监督总进度、查看日志、重试或报告硬阻塞，不得绕过状态机亲自改过程库。
 
+主控Agent必须保持前台监督 worker 路由：默认使用 `--worker-loop supervised`，每次 worker 写出一个任务包产物或章节提交检查点后，管线会返回前台；主控Agent必须读取 run_pipeline 输出、worker 日志、状态文件和返回码，并按同一路由重跑。不得把 worker 任务后台启动后结束主会话；后台任务 ID、窗口已打开、命令已启动都不等于流程完成；不得等待 task-notification；不得使用后台任务托管主流程；必须等待前台命令返回码。只有用户明确要求无人值守连续跑到底时，才追加 `--worker-loop continuous`。
+
 同一套路由也适用于分章分析自动命令：`visual-assets-auto <项目目录> --run-mode subagent|serial|worker` 和 `chapter-structure-auto <项目目录> --run-mode subagent|serial|worker`。worker 路由使用 `--worker-provider auto|agy|codebuddy` 或显式 `--worker-command`，返回 `2` 仍表示当前分章/aggregate任务包需要按路由完成后立刻重跑。
 
 执行循环：
-1. 始终运行同一路由命令：`run_pipeline.py run <项目目录> --run-mode subagent|serial|worker`；worker 路由使用 `--worker-provider auto` 或用户显式提供的 worker 命令。
+1. 始终运行同一路由命令：`run_pipeline.py run <项目目录> --run-mode subagent|serial|worker`；worker 路由使用 `--worker-provider auto` 或用户显式提供的 worker 命令，默认 supervised 检查点返回后立刻由主控Agent重跑同一命令。
 2. 返回码为 `0` 时，检查是否全部章节已经可信完成；如果仍有后续流程，继续运行同一条带 worker 的命令。
 3. 返回码为 `2` 时，按当前路由处理：
    - `subagent`：立即派发子Agent读取任务包并写出目标产物；子Agent完成后主会话再次运行同一管线命令。

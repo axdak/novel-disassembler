@@ -23,7 +23,14 @@ record.write_text(json.dumps({
     "argv": sys.argv[1:],
     "stdin": sys.stdin.read(),
     "node_options": os.environ.get("NODE_OPTIONS", ""),
+    "task_pack": os.environ.get("ND_TASK_PACK", ""),
+    "expected_output": os.environ.get("ND_EXPECTED_OUTPUT", ""),
 }, ensure_ascii=False, indent=2), encoding="utf-8")
+if os.environ.get("FAKE_CLI_DIRECT_WRITE") == "1":
+    output = Path(os.environ["ND_EXPECTED_OUTPUT"])
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("# generated direct artifact\\n" + os.environ.get("ND_TASK_TYPE", "") + "\\n", encoding="utf-8")
+    raise SystemExit(0)
 print("# generated artifact")
 print(os.environ.get("ND_TASK_TYPE", ""))
 """,
@@ -31,13 +38,13 @@ print(os.environ.get("ND_TASK_TYPE", ""))
     )
 
 
-def run_worker(provider: str, provider_env: str, extra_env=None):
+def run_worker(provider: str, provider_env: str, extra_env=None, task_text: str | None = None):
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         project = root / "project"
         project.mkdir()
         task = root / "task.md"
-        task.write_text("# Task\nWrite the target file.\n", encoding="utf-8")
+        task.write_text(task_text or "# Task\nWrite the target file.\n", encoding="utf-8")
         output = root / "out.md"
         fake_cli = root / "fake_cli.py"
         record = root / "record.json"
@@ -86,26 +93,54 @@ def test_codebuddy_provider_writes_stdout_to_expected_output():
 
 
 def test_agy_provider_uses_print_mode_and_writes_output():
-    result, output_text, payload = run_worker("agy", "ND_AGY_BIN")
+    result, output_text, payload = run_worker(
+        "agy",
+        "ND_AGY_BIN",
+        {"FAKE_CLI_DIRECT_WRITE": "1"},
+    )
 
     assert result.returncode == 0, result.stdout
-    assert "analysis" in output_text
-    assert "--print" in payload["argv"]
+    assert output_text.startswith("# generated direct artifact")
+    assert "-p" in payload["argv"] or "--print" in payload["argv"]
     assert "--print-timeout" in payload["argv"]
     assert "--add-dir" in payload["argv"]
-    assert "Write the target file." in payload["stdin"]
+    assert payload["stdin"] == ""
+    prompt = payload["argv"][payload["argv"].index("-p") + 1]
+    assert payload["task_pack"] in prompt
+    assert payload["expected_output"] in prompt
+    assert "Write the target file." not in prompt
+
+
+def test_agy_provider_passes_task_pack_path_instead_of_full_task_text():
+    sentinel = "LONG_TASK_BODY_SENTINEL"
+    long_task_text = "# Task\n" + sentinel + "\n" + ("x" * 50000)
+    result, output_text, payload = run_worker(
+        "agy",
+        "ND_AGY_BIN",
+        {"FAKE_CLI_DIRECT_WRITE": "1"},
+        task_text=long_task_text,
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert output_text.startswith("# generated direct artifact")
+    argv = payload["argv"]
+    prompt = argv[argv.index("-p") + 1]
+    assert len(prompt) < 8000
+    assert sentinel not in prompt
+    assert payload["task_pack"] in prompt
+    assert payload["expected_output"] in prompt
 
 
 def test_auto_provider_selects_first_available_cli():
     result, output_text, payload = run_worker(
         "auto",
         "ND_AGY_BIN",
-        {"ND_AGENT_PROVIDER_ORDER": "agy,codebuddy"},
+        {"ND_AGENT_PROVIDER_ORDER": "agy", "FAKE_CLI_DIRECT_WRITE": "1"},
     )
 
     assert result.returncode == 0, result.stdout
-    assert "analysis" in output_text
-    assert "--print" in payload["argv"]
+    assert output_text.startswith("# generated direct artifact")
+    assert "-p" in payload["argv"] or "--print" in payload["argv"]
     assert "selected provider: agy" in result.stdout
 
 

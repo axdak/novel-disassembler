@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -39,13 +40,20 @@ from story_schema_rules import (
     COLLECTION_KEYS,
     TRACEABLE_COLLECTION_KEYS,
     DETAIL_REF_RE,
+    STRUCTURAL_REF_FIELDS,
+    STRICT_DETAIL_KEY_FIELDS,
     SUPPLEMENTARY_TAGS_DETAIL_KEY,
+    TYPE_TO_COLLECTION,
     dump_supplementary_tags,
+    is_cumulative_detail_field,
 )
 
 
 CHAPTER_TRACE_FIELDS = ("首次章节", "最近章节")
 TOP_LEVEL_TRACE_FIELDS = ("提取理由", *CHAPTER_TRACE_FIELDS, "涉及章节")
+DETAIL_KEY_CHAPTER_WITH_SEPARATOR_RE = re.compile(r"^(?:第?\d{1,6}章?)[\-_=：:，,、\s]+")
+DETAIL_KEY_CHAPTER_WITHOUT_SEPARATOR_RE = re.compile(r"^(?:第?(\d{1,6})章)")
+DETAIL_KEY_FOUR_DIGIT_CHAPTER_RE = re.compile(r"^(\d{4})(?=\D)")
 
 
 def _ensure_detail(item: Dict[str, Any]) -> Dict[str, Any]:
@@ -138,6 +146,116 @@ def _coerce_archive_arrays(detail: Dict[str, Any], label: str, report: List[str]
         )
         detail[key] = encoded
         report.append(f"{label}.详情.{key} 普通数组 → JSON字符串数组")
+
+
+def _strip_one_detail_key_chapter_marker(key: str) -> str:
+    for pattern in (DETAIL_KEY_CHAPTER_WITH_SEPARATOR_RE, DETAIL_KEY_CHAPTER_WITHOUT_SEPARATOR_RE):
+        stripped = pattern.sub("", key, count=1).strip()
+        if stripped != key:
+            return stripped
+    match = DETAIL_KEY_FOUR_DIGIT_CHAPTER_RE.match(key)
+    if match and 0 < int(match.group(1)) <= 1000:
+        return key[4:].strip()
+    return key
+
+
+def _strip_detail_key_chapter_markers(key: str) -> str:
+    stripped = key
+    while True:
+        next_key = _strip_one_detail_key_chapter_marker(stripped)
+        if next_key == stripped:
+            return stripped
+        stripped = next_key
+
+
+def _unique_detail_key(detail: Dict[str, Any], key: str) -> str:
+    if key not in detail:
+        return key
+    index = 2
+    while f"{key}{index}" in detail:
+        index += 1
+    return f"{key}{index}"
+
+
+def _coerce_detail_key_chapter_prefixes(
+    collection_key: str, detail: Dict[str, Any], label: str, report: List[str]
+) -> None:
+    """非事件自由快照 key 不带章节号；合并器会按 Delta.章节统一加前缀。"""
+    if collection_key == "事件集":
+        return
+    for key in list(detail.keys()):
+        if not isinstance(key, str) or not key:
+            continue
+        if key in STRICT_DETAIL_KEY_FIELDS or key.startswith("关联") or is_cumulative_detail_field(key):
+            continue
+        normalized = _strip_detail_key_chapter_markers(key)
+        if not normalized or normalized == key:
+            continue
+        target = _unique_detail_key(detail, normalized)
+        detail[target] = detail.pop(key)
+        report.append(f"{label}.详情键章节前缀[{key}]已剥离为[{target}]")
+
+
+def _append_pending_ref(
+    item: Dict[str, Any],
+    field: str,
+    value: str,
+    label: str,
+    report: List[str],
+) -> None:
+    detail = _ensure_detail(item)
+    pending = detail.get("待确认引用")
+    if isinstance(pending, str):
+        try:
+            values = json.loads(pending)
+            if not isinstance(values, list):
+                values = []
+        except json.JSONDecodeError:
+            values = []
+    elif isinstance(pending, list):
+        values = [stringify(v).strip() for v in pending if stringify(v).strip()]
+    else:
+        values = []
+
+    if value not in values:
+        values.append(value)
+    detail["待确认引用"] = json.dumps(values, ensure_ascii=False, separators=(",", ":"))
+    report.append(f"{label}.{field} 不匹配类型前缀[{value}]，移入详情.待确认引用")
+
+
+def _coerce_structural_ref_prefixes(
+    collection_key: str, item: Dict[str, Any], label: str, report: List[str]
+) -> None:
+    """标准引用字段已知目标集合；匹配前缀剥离，错配前缀移入待确认引用。"""
+    for field, target_collection, kind in STRUCTURAL_REF_FIELDS.get(collection_key, []):
+        if kind == "relation_list" or field not in item:
+            continue
+
+        def coerce_one(value: Any) -> tuple[Any, bool]:
+            if not isinstance(value, str):
+                return value, True
+            clean = value.strip()
+            match = DETAIL_REF_RE.match(clean)
+            if not match:
+                return value, True
+            ref_type, ref_name = match.group(1), match.group(2).strip()
+            if TYPE_TO_COLLECTION.get(ref_type) == target_collection:
+                report.append(f"{label}.{field} 标准字段前缀[{ref_type}:]已剥离")
+                return ref_name, True
+            _append_pending_ref(item, field, clean, label, report)
+            return value, False
+
+        value = item.get(field)
+        if kind == "scalar":
+            new_value, keep = coerce_one(value)
+            item[field] = new_value if keep else ""
+        elif kind == "list" and isinstance(value, list):
+            coerced = []
+            for elem in value:
+                new_elem, keep = coerce_one(elem)
+                if keep:
+                    coerced.append(new_elem)
+            item[field] = coerced
 
 
 def _coerce_role(item: Dict[str, Any], label: str, report: List[str]) -> None:
@@ -247,6 +365,7 @@ def _coerce_item(collection_key: str, item: Any, idx: int, report: List[str]) ->
     # 共通：迁回顶层追溯字段，确保详情存在
     _move_top_trace_fields_to_detail(item, label, report)
     detail = _ensure_detail(item)
+    _coerce_detail_key_chapter_prefixes(collection_key, detail, label, report)
     _coerce_supplementary_tags(detail, label, report)
     _coerce_archive_arrays(detail, label, report)
 
@@ -255,6 +374,8 @@ def _coerce_item(collection_key: str, item: Any, idx: int, report: List[str]) ->
         _coerce_role(item, label, report)
     elif collection_key == "事件集":
         _coerce_event(item, label, report)
+
+    _coerce_structural_ref_prefixes(collection_key, item, label, report)
 
     # 章节追溯字段（角色/地点/线索/阵营/物品共享）
     if collection_key in TRACEABLE_COLLECTION_KEYS:

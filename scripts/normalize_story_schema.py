@@ -329,7 +329,7 @@ def normalize_refs(item: Dict[str, Any], collection_key: str, name_sets: Dict[st
 
 
 def normalize_detail_refs(detail: Dict[str, Any], name_sets: Dict[str, set], alias_maps: Dict[str, Dict[str, str]], logs: List[str], quarantine_invalid_refs: bool) -> None:
-    # 详情的引用保持 类型:名称；别名可规范化；不存在引用不删除，保留为字符串/数组，让 process warning 或 final error。
+    # 详情的引用保持 类型:名称；数组项开启 quarantine 时，不存在引用下沉到待确认引用。
     for key, value in list(detail.items()):
         if isinstance(value, str):
             m = DETAIL_REF_RE.match(value.strip())
@@ -337,9 +337,11 @@ def normalize_detail_refs(detail: Dict[str, Any], name_sets: Dict[str, set], ali
                 typ, ref = m.group(1), m.group(2).strip()
                 target = TYPE_TO_COLLECTION[typ]
                 resolved = resolve_name(ref, target, name_sets, alias_maps, logs)
-                detail[key] = f"{('物品' if typ == '道具' else typ)}:{resolved}"
+                display_type = "物品" if typ == "道具" else typ
+                detail[key] = f"{display_type}:{resolved}"
         elif isinstance(value, list):
             new = []
+            invalid = []
             for elem in value:
                 if not isinstance(elem, str):
                     continue
@@ -349,10 +351,21 @@ def normalize_detail_refs(detail: Dict[str, Any], name_sets: Dict[str, set], ali
                 typ, ref = m.group(1), m.group(2).strip()
                 target = TYPE_TO_COLLECTION[typ]
                 resolved = resolve_name(ref, target, name_sets, alias_maps, logs)
-                new_elem = f"{('物品' if typ == '道具' else typ)}:{resolved}"
-                if new_elem not in new:
+                display_type = "物品" if typ == "道具" else typ
+                new_elem = f"{display_type}:{resolved}"
+                if quarantine_invalid_refs and resolved not in name_sets.get(target, set()):
+                    if new_elem not in invalid:
+                        invalid.append(new_elem)
+                    append_detail(detail, "待确认引用", new_elem, logs)
+                    logs.append(f"详情.{key} 的无效/前向引用[{new_elem}]已移入详情.待确认引用")
+                elif new_elem not in new:
                     new.append(new_elem)
-            detail[key] = new
+            if new:
+                detail[key] = new
+            elif invalid:
+                detail[key] = []
+            else:
+                detail.pop(key, None)
 
 
 def normalize_item(raw: Any, collection_key: str, logs: List[str]) -> Dict[str, Any]:

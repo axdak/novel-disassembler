@@ -252,7 +252,85 @@ def test_delta_phase_requires_every_analysis_md_before_first_delta_task():
         assert not list((project / "故事结构版本").glob("story_*"))
 
 
-def test_run_with_chapter_worker_continues_through_analysis_and_delta():
+def write_simple_chapter_worker(worker: Path, seq: int = 1) -> None:
+    analysis_text = valid_analysis(seq)
+    delta_text = json.dumps(empty_delta(seq), ensure_ascii=False, indent=2)
+    worker.write_text(
+        f"""
+import os
+from pathlib import Path
+
+task_type = os.environ["ND_TASK_TYPE"]
+output = Path(os.environ["ND_EXPECTED_OUTPUT"])
+output.parent.mkdir(parents=True, exist_ok=True)
+
+if task_type in ("analysis", "analysis_regenerate"):
+    output.write_text({analysis_text!r}, encoding="utf-8")
+elif task_type in ("delta", "repair_chapter"):
+    output.write_text({delta_text!r}, encoding="utf-8")
+else:
+    raise SystemExit(f"unexpected task type: {{task_type}}")
+""",
+        encoding="utf-8",
+    )
+
+
+def test_worker_route_defaults_to_supervised_handoffs_after_each_worker_task():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        project = root / "project"
+        write_json(project / "\u6545\u4e8b\u7ed3\u6784_\u589e\u91cf.json", empty_story())
+        chapter = project / "\u539f\u6587\u62c6\u89e3" / "\u7b2c001\u7ae0_test.md"
+        chapter.parent.mkdir(parents=True, exist_ok=True)
+        chapter.write_text("# chapter 001\nsource text.\n", encoding="utf-8")
+        paths = artifact_paths(project, chapter)
+        worker = root / "chapter_worker.py"
+        write_simple_chapter_worker(worker)
+        command = f'"{sys.executable}" "{worker}"'
+
+        rc = cmd_run(
+            project,
+            audit_interval=0,
+            chapter_command=command,
+            run_mode="worker",
+            worker_window="hidden",
+        )
+        assert rc == 2
+        assert paths["analysis"].is_file()
+        assert not paths["delta"].is_file()
+        assert not paths["after"].is_file()
+
+        rc = cmd_run(
+            project,
+            audit_interval=0,
+            chapter_command=command,
+            run_mode="worker",
+            worker_window="hidden",
+        )
+        assert rc == 2
+        assert paths["delta"].is_file()
+        assert not paths["after"].is_file()
+
+        rc = cmd_run(
+            project,
+            audit_interval=0,
+            chapter_command=command,
+            run_mode="worker",
+            worker_window="hidden",
+        )
+        assert rc == 2
+        assert paths["after"].is_file()
+
+        assert cmd_run(
+            project,
+            audit_interval=0,
+            chapter_command=command,
+            run_mode="worker",
+            worker_window="hidden",
+        ) == 0
+
+
+def test_run_with_chapter_worker_continuous_loop_completes_analysis_and_delta():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         project = root / "拆书_测试"
@@ -321,6 +399,7 @@ else:
             audit_interval=0,
             chapter_command=f'"{sys.executable}" "{worker}"',
             worker_window="hidden",
+            worker_loop="continuous",
         )
 
         assert rc == 0
@@ -344,11 +423,18 @@ def test_run_with_worker_provider_uses_builtin_wrapper_for_chapter_flow():
 import json
 import os
 import sys
+from pathlib import Path
 
 sys.stdin.read()
 task_type = os.environ["ND_TASK_TYPE"]
+output = Path(os.environ["ND_EXPECTED_OUTPUT"])
+
+def emit(text):
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text.strip() + "\\n", encoding="utf-8")
+
 if task_type in ("analysis", "analysis_regenerate"):
-    print('''# 第001章分析
+    emit('''# 第001章分析
 ## 1. 剧情梗概
 本章围绕主角接到意外来信后前往约定地点展开。来信暴露了旧日承诺的漏洞，主角在犹豫后决定当面求证，结尾以陌生人出现留下新的悬念。
 ## 2. 出场人物
@@ -374,7 +460,7 @@ if task_type in ("analysis", "analysis_regenerate"):
 应提取来信事件、约定地点与陌生人线索。''')
 elif task_type in ("delta", "repair_chapter"):
     empty = {"角色集": [], "事件集": [], "地点集": [], "线索集": [], "阵营集": [], "物品集": [], "其他事项集": []}
-    print(json.dumps({"章节": "第001章", "新增元素": empty, "修改元素": empty}, ensure_ascii=False, indent=2))
+    emit(json.dumps({"章节": "第001章", "新增元素": empty, "修改元素": empty}, ensure_ascii=False, indent=2))
 else:
     raise SystemExit(f"unexpected task type: {task_type}")
 """,
@@ -389,6 +475,7 @@ else:
                 worker_provider="agy",
                 run_mode="worker",
                 worker_window="hidden",
+                worker_loop="continuous",
             )
         finally:
             if old_agy is None:
@@ -446,5 +533,6 @@ if __name__ == "__main__":
     test_analysis_phase_hands_off_regeneration_for_invalid_md_only()
     test_run_cli_phase_analysis_generates_analysis_task_without_delta_task()
     test_delta_phase_requires_every_analysis_md_before_first_delta_task()
-    test_run_with_chapter_worker_continues_through_analysis_and_delta()
+    test_worker_route_defaults_to_supervised_handoffs_after_each_worker_task()
+    test_run_with_chapter_worker_continuous_loop_completes_analysis_and_delta()
     print("\n全部测试通过 [PASS]")
