@@ -176,6 +176,66 @@ final-pack → 模型根据任务包修改草稿 → commit-final-draft
   ↓ 通过：finalize → 输出 故事结构.json，步骤4完成
 ```
 
+## Obsidian Vault 导出
+
+Obsidian 导出是只读镜像：`故事结构.json` 或 `故事结构_增量.json` 仍然是主库，导出的 Markdown Vault 用于阅读、图谱、反向链接、Dataview 查询、人工批注和 AI 插件检索；不要把 Obsidian 修改反写回故事结构 JSON。
+
+推荐入口：
+
+```bash
+python <skill_path>/scripts/export_obsidian_vault.py <项目目录> \
+  --source final \
+  --out <项目目录>/导出/obsidian-vault \
+  --single-file <项目目录>/导出/故事结构总览.md \
+  --include-dataview \
+  --include-canvas \
+  --clean
+```
+
+也可以直接指定 JSON 文件：
+
+```bash
+python <skill_path>/scripts/export_obsidian_vault.py <项目目录>/故事结构.json \
+  --out <项目目录>/导出/obsidian-vault \
+  --single-file <项目目录>/导出/故事结构总览.md \
+  --include-dataview \
+  --clean
+```
+
+常用参数：
+
+- `--source final|process`：输入为项目目录时，选择 `故事结构.json` 或 `故事结构_增量.json`。
+- `--single-file <md路径>`：同时生成一个完整大的 Markdown 文件，便于 AI 插件、Claude Obsidian 或全文阅读。
+- `--include-dataview`：生成 `_dataview/查询-主角.md`、`查询-未回收线索.md`、`查询-按章节事件.md`、`查询-按阵营角色.md`。
+- `--include-canvas`：生成 `00-总览/故事图谱.canvas`。
+- `--filename-mode name|type-name`：对象页文件名使用纯名称，或加类型前缀避免跨目录迁移时冲突。
+- `--clean`：导出前清空旧 Vault，避免已经删除的对象残留。
+
+导出目录结构：
+
+```text
+obsidian-vault/
+  00-总览/
+    故事总览.md
+    时间线.md
+    角色索引.md
+    阵营索引.md
+    地点索引.md
+    线索索引.md
+    物品索引.md
+    其他事项索引.md
+    故事图谱.canvas
+  角色/
+  事件/
+  地点/
+  线索/
+  阵营/
+  物品/
+  其他事项/
+  _dataview/
+  _meta/
+```
+
 ## 资源清单
 
 ### scripts/
@@ -184,6 +244,9 @@ final-pack → 模型根据任务包修改草稿 → commit-final-draft
 - `run_pipeline.py`：主控器，推进章节、生成任务包、提交章节/治理/最终交付；默认不调用大模型，配置外部 worker 后可自动交接当前任务包并验收产物。
 - `progress_manager.py`：进度管理脚本，初始化、查询、更新、断点恢复、摘要生成。
 - `tools/agent_worker.py`：外部 CLI worker wrapper，支持 `auto`、`agy`、`codebuddy` provider，把当前任务包转换为 headless prompt；单产物任务把 CLI stdout 写入期望产物，多产物任务通过 `ND_EXPECTED_OUTPUTS` 要求 provider 直接写项目文件并由主控验收。
+
+**Obsidian / Markdown 导出**
+- `export_obsidian_vault.py`：把 `故事结构.json` 或 `故事结构_增量.json` 导出为 Obsidian Vault，并可同时生成完整大 Markdown。
 
 **步骤 1：章节拆分**
 - `split_chapters.py`：章节拆分脚本，自动检测章节模式并拆分，支持 txt/docx。
